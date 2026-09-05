@@ -1,0 +1,16 @@
+# Do not commit the guide
+rule.md
+
+# Real secrets and local environment
+.env
+
+# Dependencies and builds
+node_modules/
+client/dist/
+
+# Local-only tooling
+tools/
+
+# OS noise
+Thumbs.db
+.DS_Store

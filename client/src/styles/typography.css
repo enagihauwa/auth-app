@@ -1,0 +1,230 @@
+/*
+ * typography.css
+ * Typography hierarchy derived 1:1 from the design tokens.
+ * Utilities consume the provided tokens for every text property.
+ */
+
+/* --- Display --- */
+
+.type-display-large {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-display-large-fontsize);
+  font-weight: var(--typography-display-large-fontweight);
+  font-style: var(--typography-display-large-fontstyle);
+  font-stretch: var(--typography-display-large-fontstretch);
+  line-height: var(--typography-display-large-lineheight);
+  letter-spacing: var(--typography-display-large-letterspacing);
+  text-decoration: var(--typography-display-large-textdecoration);
+  text-transform: var(--typography-display-large-textcase);
+  text-indent: var(--typography-display-large-paragraphindent);
+}
+
+.type-display-medium {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-display-medium-fontsize);
+  font-weight: var(--typography-display-medium-fontweight);
+  font-style: var(--typography-display-medium-fontstyle);
+  font-stretch: var(--typography-display-medium-fontstretch);
+  line-height: var(--typography-display-medium-lineheight);
+  letter-spacing: var(--typography-display-medium-letterspacing);
+  text-decoration: var(--typography-display-medium-textdecoration);
+  text-transform: var(--typography-display-medium-textcase);
+  text-indent: var(--typography-display-medium-paragraphindent);
+}
+
+.type-display-small {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-display-small-fontsize);
+  font-weight: var(--typography-display-small-fontweight);
+  font-style: var(--typography-display-small-fontstyle);
+  font-stretch: var(--typography-display-small-fontstretch);
+  line-height: var(--typography-display-small-lineheight);
+  letter-spacing: var(--typography-display-small-letterspacing);
+  text-decoration: var(--typography-display-small-textdecoration);
+  text-transform: var(--typography-display-small-textcase);
+  text-indent: var(--typography-display-small-paragraphindent);
+}
+
+/* --- Headline --- */
+
+.type-headline-large {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-headline-large-fontsize);
+  font-weight: var(--typography-headline-large-fontweight);
+  font-style: var(--typography-headline-large-fontstyle);
+  font-stretch: var(--typography-headline-large-fontstretch);
+  line-height: var(--typography-headline-large-lineheight);
+  letter-spacing: var(--typography-headline-large-letterspacing);
+  text-decoration: var(--typography-headline-large-textdecoration);
+  text-transform: var(--typography-headline-large-textcase);
+  text-indent: var(--typography-headline-large-paragraphindent);
+}
+
+.type-headline-medium {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-headline-medium-fontsize);
+  font-weight: var(--typography-headline-medium-fontweight);
+  font-style: var(--typography-headline-medium-fontstyle);
+  font-stretch: var(--typography-headline-medium-fontstretch);
+  line-height: var(--typography-headline-medium-lineheight);
+  letter-spacing: var(--typography-headline-medium-letterspacing);
+  text-decoration: var(--typography-headline-medium-textdecoration);
+  text-transform: var(--typography-headline-medium-textcase);
+  text-indent: var(--typography-headline-medium-paragraphindent);
+}
+
+.type-headline-small {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-headline-small-fontsize);
+  font-weight: var(--typography-headline-small-fontweight);
+  font-style: var(--typography-headline-small-fontstyle);
+  font-stretch: var(--typography-headline-small-fontstretch);
+  line-height: var(--typography-headline-small-lineheight);
+  letter-spacing: var(--typography-headline-small-letterspacing);
+  text-decoration: var(--typography-headline-small-textdecoration);
+  text-transform: var(--typography-headline-small-textcase);
+  text-indent: var(--typography-headline-small-paragraphindent);
+}
+
+/* --- Title --- */
+
+.type-title-large {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-title-large-fontsize);
+  font-weight: var(--typography-title-large-fontweight);
+  font-style: var(--typography-title-large-fontstyle);
+  font-stretch: var(--typography-title-large-fontstretch);
+  line-height: var(--typography-title-large-lineheight);
+  letter-spacing: var(--typography-title-large-letterspacing);
+  text-decoration: var(--typography-title-large-textdecoration);
+  text-transform: var(--typography-title-large-textcase);
+  text-indent: var(--typography-title-large-paragraphindent);
+}
+
+.type-title-medium {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-title-medium-fontsize);
+  font-weight: var(--typography-title-medium-fontweight);
+  font-style: var(--typography-title-medium-fontstyle);
+  font-stretch: var(--typography-title-medium-fontstretch);
+  line-height: var(--typography-title-medium-lineheight);
+  letter-spacing: var(--typography-title-medium-letterspacing);
+  text-decoration: var(--typography-title-medium-textdecoration);
+  text-transform: var(--typography-title-medium-textcase);
+  text-indent: var(--typography-title-medium-paragraphindent);
+}
+
+.type-title-small {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-title-small-fontsize);
+  font-weight: var(--typography-title-small-fontweight);
+  font-style: var(--typography-title-small-fontstyle);
+  font-stretch: var(--typography-title-small-fontstretch);
+  line-height: var(--typography-title-small-lineheight);
+  letter-spacing: var(--typography-title-small-letterspacing);
+  text-decoration: var(--typography-title-small-textdecoration);
+  text-transform: var(--typography-title-small-textcase);
+  text-indent: var(--typography-title-small-paragraphindent);
+}
+
+/* --- Body --- */
+
+.type-body-large {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-body-large-fontsize);
+  font-weight: var(--typography-body-large-fontweight);
+  font-style: var(--typography-body-large-fontstyle);
+  font-stretch: var(--typography-body-large-fontstretch);
+  line-height: var(--typography-body-large-lineheight);
+  letter-spacing: var(--typography-body-large-letterspacing);
+  text-decoration: var(--typography-body-large-textdecoration);
+  text-transform: var(--typography-body-large-textcase);
+  text-indent: var(--typography-body-large-paragraphindent);
+}
+
+.type-body-medium {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-body-medium-fontsize);
+  font-weight: var(--typography-body-medium-fontweight);
+  font-style: var(--typography-body-medium-fontstyle);
+  font-stretch: var(--typography-body-medium-fontstretch);
+  line-height: var(--typography-body-medium-lineheight);
+  letter-spacing: var(--typography-body-medium-letterspacing);
+  text-decoration: var(--typography-body-medium-textdecoration);
+  text-transform: var(--typography-body-medium-textcase);
+  text-indent: var(--typography-body-medium-paragraphindent);
+}
+
+.type-body-small {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-body-small-fontsize);
+  font-weight: var(--typography-body-small-fontweight);
+  font-style: var(--typography-body-small-fontstyle);
+  font-stretch: var(--typography-body-small-fontstretch);
+  line-height: var(--typography-body-small-lineheight);
+  letter-spacing: var(--typography-body-small-letterspacing);
+  text-decoration: var(--typography-body-small-textdecoration);
+  text-transform: var(--typography-body-small-textcase);
+  text-indent: var(--typography-body-small-paragraphindent);
+}
+
+/* --- Label --- */
+
+.type-label-large {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-label-large-fontsize);
+  font-weight: var(--typography-label-large-fontweight);
+  font-style: var(--typography-label-large-fontstyle);
+  font-stretch: var(--typography-label-large-fontstretch);
+  line-height: var(--typography-label-large-lineheight);
+  letter-spacing: var(--typography-label-large-letterspacing);
+  text-decoration: var(--typography-label-large-textdecoration);
+  text-transform: var(--typography-label-large-textcase);
+  text-indent: var(--typography-label-large-paragraphindent);
+}
+
+.type-label-medium {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-label-medium-fontsize);
+  font-weight: var(--typography-label-medium-fontweight);
+  font-style: var(--typography-label-medium-fontstyle);
+  font-stretch: var(--typography-label-medium-fontstretch);
+  line-height: var(--typography-label-medium-lineheight);
+  letter-spacing: var(--typography-label-medium-letterspacing);
+  text-decoration: var(--typography-label-medium-textdecoration);
+  text-transform: var(--typography-label-medium-textcase);
+  text-indent: var(--typography-label-medium-paragraphindent);
+}
+
+.type-label-small {
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-label-small-fontsize);
+  font-weight: var(--typography-label-small-fontweight);
+  font-style: var(--typography-label-small-fontstyle);
+  font-stretch: var(--typography-label-small-fontstretch);
+  line-height: var(--typography-label-small-lineheight);
+  letter-spacing: var(--typography-label-small-letterspacing);
+  text-decoration: var(--typography-label-small-textdecoration);
+  text-transform: var(--typography-label-small-textcase);
+  text-indent: var(--typography-label-small-paragraphindent);
+}
+
+/* --- Number / data typography (Neue Haas Grotesk Display Pro stack) --- */
+
+.type-number {
+  font-family: var(--typography-number-fontfamily);
+  letter-spacing: var(--typography-number-letterspacing);
+  font-variant-numeric: tabular-nums;
+}
+
+.type-number-regular {
+  font-weight: var(--typography-number-fontweight-regular);
+}
+
+.type-number-medium {
+  font-weight: var(--typography-number-fontweight-medium);
+}
+
+.type-number-bold {
+  font-weight: var(--typography-number-fontweight-bold);
+}

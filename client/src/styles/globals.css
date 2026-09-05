@@ -1,0 +1,205 @@
+/*
+ * globals.css
+ * Reset, base elements, layout primitives, and app-level patterns.
+ * Everything colours, types, spacing, and shadows through tokens.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--colour-roles-background);
+  color: var(--colour-roles-on-background);
+  font-family: var(--font-dm-sans);
+  font-size: var(--typography-body-medium-fontsize);
+  line-height: var(--typography-body-medium-lineheight);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--colour-roles-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* Visible, contrast-aware focus ring for keyboard users. */
+:focus-visible {
+  outline: 2px solid var(--colour-roles-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+::selection {
+  background: var(--colour-roles-primary-container);
+  color: var(--colour-roles-on-primary-container);
+}
+
+/* --- Layout primitives --- */
+
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--spacing-collection-large-spacing);
+}
+
+.page {
+  width: min(100% - 2rem, 28rem);
+  margin-inline: auto;
+}
+
+.stack {
+  display: grid;
+  gap: var(--spacing-collection-base-spacing);
+}
+
+.stack--sm {
+  gap: var(--spacing-collection-small-spacing);
+}
+
+.stack--lg {
+  gap: var(--spacing-collection-large-spacing);
+}
+
+.center {
+  text-align: center;
+}
+
+.muted {
+  color: var(--colour-roles-on-surface-variant);
+}
+
+/* Auth card composition */
+.auth-card {
+  width: min(100%, 26rem);
+  padding: var(--spacing-collection-very-large-spacing);
+  display: grid;
+  gap: var(--spacing-collection-large-spacing);
+}
+
+.auth-card__header {
+  display: grid;
+  gap: var(--spacing-collection-extra-small-spacing);
+}
+
+.auth-card__title {
+  font-size: var(--typography-headline-small-fontsize);
+  font-weight: var(--typography-headline-small-fontweight);
+  line-height: var(--typography-headline-small-lineheight);
+  letter-spacing: var(--typography-headline-small-letterspacing);
+  color: var(--colour-roles-on-surface);
+}
+
+.auth-card__subtitle {
+  font-size: var(--typography-body-medium-fontsize);
+  line-height: var(--typography-body-medium-lineheight);
+  color: var(--colour-roles-on-surface-variant);
+}
+
+.link-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--spacing-collection-base-spacing);
+  font-size: var(--typography-body-medium-fontsize);
+}
+
+.link-row a {
+  color: var(--colour-roles-primary);
+  font-weight: var(--typography-label-large-fontweight);
+}
+
+/* Resend row on the verify page */
+.resend-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--spacing-collection-small-spacing);
+  min-height: 40px;
+}
+
+.resend-timer {
+  font-size: var(--typography-body-medium-fontsize);
+  color: var(--colour-roles-on-surface-variant);
+}
+
+/* Dashboard layout */
+.dashboard-wrap {
+  width: min(100% - 2rem, 46rem);
+  margin-inline: auto;
+  padding: var(--spacing-collection-very-large-spacing) 0;
+  display: grid;
+  gap: var(--spacing-collection-extra-large-spacing);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--spacing-collection-base-spacing);
+}
+
+.divider {
+  height: 1px;
+  background: var(--colour-roles-outline-variant);
+  border: 0;
+  margin: 0;
+}
+
+/* Respect reduced-motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

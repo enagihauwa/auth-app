@@ -1,0 +1,21 @@
+{
+  "name": "auth-assessment",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Authentication slice assessment: signup, signin, verification, password reset, protected dashboard.",
+  "scripts": {
+    "setup": "npm --prefix server install && npm --prefix client install",
+    "db:migrate": "node --env-file-if-exists=.env server/scripts/migrate.js",
+    "dev": "concurrently -k -n mail,api,client -c blue,green,magenta \"npm run dev:mail\" \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "node --env-file-if-exists=.env --watch server/src/index.js",
+    "dev:client": "npm --prefix client run dev",
+    "dev:mail": "tools\\mailpit\\mailpit.exe"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

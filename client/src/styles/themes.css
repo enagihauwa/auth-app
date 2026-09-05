@@ -1,0 +1,79 @@
+/*
+ * themes.css
+ * Theme wiring, supplementary aliases, and component-level status tokens.
+ * The colour roles themselves live in tokens.css (source of truth).
+ * Dark mode is activated by the `dark` class on <html> (e.g. <html class="dark">).
+ */
+
+:root {
+  color-scheme: light;
+}
+
+:root.dark {
+  color-scheme: dark;
+}
+
+/* Supplementary font stacks consumed by the provided tokens. */
+:root {
+  --font-dm-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-geist-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/*
+ * Supplementary semantic SUCCESS role.
+ * The provided token set ships status roles for warning and error only
+ * (flags) and has no success green. These follow the same tonal pattern
+ * (solid, on-colour, container, on-container) so success states stay
+ * inside the semantic hierarchy instead of hardcoding greens per component.
+ */
+:root {
+  --colour-roles-success: #17693b;
+  --colour-roles-on-success: #ffffff;
+  --colour-roles-success-container: #d7f0e2;
+  --colour-roles-on-success-container: #07301c;
+}
+
+:root.dark {
+  --colour-roles-success: #62b989;
+  --colour-roles-on-success: #06361f;
+  --colour-roles-success-container: #14472b;
+  --colour-roles-on-success-container: #d7f0e2;
+}
+
+/*
+ * Component-level status tokens (dots, saturated indicators).
+ * Hierarchy: primitive -> semantic role -> component token -> UI.
+ * These live one layer below the roles so pixels can be saturated
+ * without components reaching into the primitive palettes directly.
+ */
+:root {
+  --ds-status-info: var(--primitive-colours-primary-colour-palette-primary60);
+  --ds-status-success: #2e8b57;
+  --ds-status-warning: var(--primitive-colours-warning-colour-palette-warning40);
+  --ds-status-error: var(--primitive-colours-error-colour-palette-error-colour-palette50);
+}
+
+:root.dark {
+  --ds-status-info: var(--primitive-colours-primary-colour-palette-primary70);
+  --ds-status-success: #62b989;
+  --ds-status-warning: var(--primitive-colours-warning-colour-palette-warning60);
+  --ds-status-error: var(--primitive-colours-error-colour-palette-error-colour-palette70);
+}
+
+/* Smooth theme switch for the themed surfaces (respects reduced motion below). */
+body,
+.ui-card,
+.ui-input,
+.ui-btn,
+.ui-alert,
+.ui-badge,
+.ui-table,
+.ui-dialog,
+.ui-stat,
+.theme-toggle-fixed,
+.demo-nav a {
+  transition: background-color 200ms ease, border-color 200ms ease,
+    color 200ms ease, box-shadow 200ms ease;
+}
