@@ -155,6 +155,47 @@
   transition: border-color 150ms ease, box-shadow 150ms ease, background-color 200ms ease;
 }
 
+.ui-input__wrapper {
+  position: relative;
+}
+
+.ui-input--password {
+  padding-right: 44px;
+}
+
+.ui-input__toggle {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--colour-roles-on-surface-variant);
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+
+.ui-input__toggle:hover {
+  color: var(--colour-roles-on-surface);
+}
+
+.ui-input__toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--colour-roles-primary) 25%, transparent);
+}
+
+.ui-input__toggle svg {
+  display: block;
+}
+
 .ui-input::placeholder {
   color: var(--colour-roles-on-surface-variant);
   opacity: 1;

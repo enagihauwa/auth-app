@@ -1,8 +1,7 @@
-import pg from "pg";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "./generated/prisma/client.ts";
 import { config } from "./config.js";
 
-export const pool = new pg.Pool({ connectionString: config.databaseUrl });
+const adapter = new PrismaPg({ connectionString: config.databaseUrl });
 
-pool.on("error", (err) => {
-  console.error("Unexpected error on idle client", err);
-});
+export const prisma = new PrismaClient({ adapter });

@@ -8,6 +8,9 @@ rule.md
 node_modules/
 client/dist/
 
+# Prisma generated client
+server/src/generated/
+
 # Local-only tooling
 tools/
 

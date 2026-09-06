@@ -3,7 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "db:migrate": "prisma migrate deploy",
+    "db:dev": "prisma migrate dev",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio --port 5555",
+    "postinstall": "prisma generate"
+  },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
     "bcrypt": "^5.1.1",
     "connect-pg-simple": "^9.0.1",
     "express": "^4.19.2",
@@ -12,5 +21,8 @@
     "nodemailer": "^6.9.15",
     "pg": "^8.13.0",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "prisma": "^7.10.0"
   }
 }

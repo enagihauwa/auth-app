@@ -8,7 +8,7 @@ Deliberately **not** included: no OAuth or social login, no multi-factor authent
 
 ## Section 2: How To Run It
 
-Prerequisites: **Node.js 22.9 or later** (the dev scripts use `node --env-file-if-exists`), **PostgreSQL 13+**, and no other process on ports `3000`, `5173`, `1025`, or `8025`. From a fresh clone:
+Prerequisites: **Node.js 22.18 or later** (the dev scripts use `node --env-file-if-exists` and the Prisma client is generated as TypeScript, which Node runs natively from 22.18 on), **PostgreSQL 13+**, and no other process on ports `3000`, `5173`, `1025`, or `8025`. From a fresh clone:
 
 1. Install dependencies from the repository root:
 
@@ -40,13 +40,22 @@ Prerequisites: **Node.js 22.9 or later** (the dev scripts use `node --env-file-i
    node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    ```
 
+   The server lives in `server/`, and the Prisma CLI also reads `server/.env` when it runs, so copy the example there too (`copy .env.example server\.env`) or create one with at least `DATABASE_URL` set.
+
 4. Run the migrations:
 
    ```
    npm run db:migrate
    ```
 
-   This applies every `server/migrations/*.sql` that has not yet been recorded in the `schema_migrations` table, in filename order, each in its own transaction. Re-running it is safe; it skips already-applied files.
+   This is `prisma migrate deploy`. Prisma records every applied migration in its own `_prisma_migrations` table, so re-running it is safe; it skips what is already applied. For day-to-day schema changes, prefer the dev command `npm run db:dev` (`prisma migrate dev`), which generates a new migration from any schema change and applies it.
+
+   > **Adopting Prisma on a pre-existing database.** If this repository is older than the switch to Prisma, the database already has its tables and an obsolete `schema_migrations` bookkeeping table from the old runner. Point `prisma.config.ts` at that database (via `server/.env`), then record the initial migration as already applied and drop the stale table instead of replaying it:
+   >
+   > ```
+   > npm --prefix server exec prisma migrate resolve --applied 20240101000000_init
+   > psql "postgres://.../auth_db" -c "DROP TABLE IF EXISTS schema_migrations;"
+   > ```
 
 5. Start everything with one command:
 

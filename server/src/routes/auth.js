@@ -1,6 +1,6 @@
 import { Router } from "express";
 import bcrypt from "bcrypt";
-import { pool } from "../db.js";
+import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { sha256Hex, createVerificationCode, createResetToken } from "../services/tokens.js";
 import { sendEmail, verificationEmail, resetEmail } from "../mailer.js";
@@ -26,7 +26,7 @@ const router = Router();
 const BCRYPT_COST = 12;
 
 async function sendVerificationCode(email, userId) {
-  const code = await createVerificationCode(pool, userId, {
+  const code = await createVerificationCode(userId, {
     ttlMs: config.timings.verificationCodeTtlMs,
   });
   await sendEmail({
@@ -42,18 +42,17 @@ router.post(
   async (req, res) => {
     const { name, email, password } = req.body;
     const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+    const normalizedEmail = email.toLowerCase();
 
     let userId;
     try {
-      const { rows } = await pool.query(
-        `INSERT INTO users (name, email, password_hash)
-         VALUES ($1, $2, $3)
-         RETURNING id`,
-        [name, email.toLowerCase(), passwordHash]
-      );
-      userId = rows[0].id;
+      const user = await prisma.user.create({
+        data: { name, email: normalizedEmail, passwordHash },
+        select: { id: true },
+      });
+      userId = user.id;
     } catch (err) {
-      if (err.code === "23505") {
+      if (err.code === "P2002") {
         return res
           .status(200)
           .json({ message: "If that email is available, we sent a verification code." });
@@ -72,7 +71,7 @@ router.post(
 
     return res.status(201).json({
       message: "Account created. Check your email for a verification code.",
-      email: email.toLowerCase(),
+      email: normalizedEmail,
     });
   }
 );
@@ -83,48 +82,40 @@ router.post(
   async (req, res) => {
     const { email, code } = req.body;
 
-    const { rows: users } = await pool.query(
-      "SELECT id, email FROM users WHERE lower(email) = lower($1)",
-      [email]
-    );
-    if (users.length === 0) {
+    const user = await prisma.user.findFirst({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true },
+    });
+    if (!user) {
       return res.status(404).json({ error: "No account found with that email." });
     }
 
-    const { rows } = await pool.query(
-      `SELECT id FROM email_verification_codes
-       WHERE user_id = $1
-         AND code_hash = $2
-         AND consumed_at IS NULL
-         AND expires_at > now()
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [users[0].id, sha256Hex(code)]
-    );
-    if (rows.length === 0) {
+    const codeRow = await prisma.emailVerificationCode.findFirst({
+      where: {
+        userId: user.id,
+        codeHash: sha256Hex(code),
+        consumedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    });
+    if (!codeRow) {
       return res.status(400).json({ error: "That code is invalid or has expired. Request a new one." });
     }
 
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
-        "UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1",
-        [rows[0].id]
-      );
-      await client.query(
-        "UPDATE users SET email_verified_at = now(), updated_at = now() WHERE id = $1",
-        [users[0].id]
-      );
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+    await prisma.$transaction([
+      prisma.emailVerificationCode.update({
+        where: { id: codeRow.id },
+        data: { consumedAt: new Date() },
+      }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: { emailVerifiedAt: new Date(), updatedAt: new Date() },
+      }),
+    ]);
 
-    req.session.userId = users[0].id;
+    req.session.userId = user.id;
     return res.json({ message: "Email verified. You are signed in." });
   }
 );
@@ -136,40 +127,38 @@ router.post(
   async (req, res) => {
     const { email } = req.body;
 
-    const { rows: users } = await pool.query(
-      "SELECT id, email FROM users WHERE lower(email) = lower($1)",
-      [email]
-    );
-    if (users.length === 0) {
+    const user = await prisma.user.findFirst({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true, emailVerifiedAt: true },
+    });
+    if (!user) {
       return res.status(404).json({ error: "No account found with that email." });
     }
-    if (users[0].email_verified_at) {
+    if (user.emailVerifiedAt) {
       return res.status(400).json({ error: "That email is already verified." });
     }
 
-    const { rows: lastCodes } = await pool.query(
-      `SELECT created_at FROM email_verification_codes
-       WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > now()
-       ORDER BY created_at DESC LIMIT 1`,
-      [users[0].id]
-    );
+    const lastCode = await prisma.emailVerificationCode.findFirst({
+      where: { userId: user.id, consumedAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    });
     if (
-      lastCodes.length > 0 &&
-      Date.now() - new Date(lastCodes[0].created_at).getTime() < resendCooldownMs
+      lastCode &&
+      Date.now() - new Date(lastCode.createdAt).getTime() < resendCooldownMs
     ) {
       const wait = Math.ceil(
-        (resendCooldownMs - (Date.now() - new Date(lastCodes[0].created_at).getTime())) / 1000
+        (resendCooldownMs - (Date.now() - new Date(lastCode.createdAt).getTime())) / 1000
       );
       return res.status(429).json({ error: `Please wait ${wait} seconds before resending.` });
     }
 
-    await pool.query(
-      `UPDATE email_verification_codes SET consumed_at = now()
-       WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > now()`,
-      [users[0].id]
-    );
+    await prisma.emailVerificationCode.updateMany({
+      where: { userId: user.id, consumedAt: null, expiresAt: { gt: new Date() } },
+      data: { consumedAt: new Date() },
+    });
 
-    await sendVerificationCode(users[0].email, users[0].id);
+    await sendVerificationCode(user.email, user.id);
     return res.json({ message: "A new code is on its way." });
   }
 );
@@ -181,20 +170,19 @@ router.post(
   async (req, res) => {
     const { email, password } = req.body;
 
-    const { rows: users } = await pool.query(
-      "SELECT id, name, email, password_hash, email_verified_at FROM users WHERE lower(email) = lower($1)",
-      [email]
-    );
-    const user = users[0];
+    const user = await prisma.user.findFirst({
+      where: { email: email.toLowerCase() },
+      select: { id: true, name: true, email: true, passwordHash: true, emailVerifiedAt: true },
+    });
 
     const passwordOk =
-      user && (await bcrypt.compare(password, user.password_hash));
+      user && (await bcrypt.compare(password, user.passwordHash));
 
     if (!user || !passwordOk) {
       return res.status(401).json({ error: "Email or password is incorrect." });
     }
 
-    if (!user.email_verified_at) {
+    if (!user.emailVerifiedAt) {
       return res.status(403).json({
         error: "Verify your email before signing in.",
         needsVerification: true,
@@ -214,19 +202,19 @@ router.post(
   async (req, res) => {
     const { email } = req.body;
 
-    const { rows: users } = await pool.query(
-      "SELECT id, email FROM users WHERE lower(email) = lower($1)",
-      [email]
-    );
+    const user = await prisma.user.findFirst({
+      where: { email: email.toLowerCase() },
+      select: { id: true, email: true },
+    });
 
-    if (users.length > 0) {
-      const token = await createResetToken(pool, users[0].id, {
+    if (user) {
+      const token = await createResetToken(user.id, {
         ttlMs: config.timings.resetTokenTtlMs,
       });
       const resetUrl = `${config.appUrl}/reset?token=${token}`;
       await sendEmail({
-        to: users[0].email,
-        ...resetEmail(users[0].email, resetUrl, config.timings.resetTokenTtlMs / 60000),
+        to: user.email,
+        ...resetEmail(user.email, resetUrl, config.timings.resetTokenTtlMs / 60000),
       });
     }
 
@@ -242,38 +230,31 @@ router.post(
   async (req, res) => {
     const { token, password } = req.body;
 
-    const { rows: tokens } = await pool.query(
-      `SELECT id, user_id FROM password_reset_tokens
-       WHERE token_hash = $1
-         AND consumed_at IS NULL
-         AND expires_at > now()`,
-      [sha256Hex(token)]
-    );
-    if (tokens.length === 0) {
+    const tokenRow = await prisma.passwordResetToken.findFirst({
+      where: {
+        tokenHash: sha256Hex(token),
+        consumedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      select: { id: true, userId: true },
+    });
+    if (!tokenRow) {
       return res.status(400).json({ error: "That reset link is invalid or has expired. Request a new one." });
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
 
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
-        "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1",
-        [tokens[0].id]
-      );
-      await client.query(
-        "UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2",
-        [passwordHash, tokens[0].user_id]
-      );
-      await client.query("DELETE FROM session WHERE sess->>'userId' = $1", [tokens[0].user_id]);
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
+    await prisma.$transaction(async (tx) => {
+      await tx.passwordResetToken.update({
+        where: { id: tokenRow.id },
+        data: { consumedAt: new Date() },
+      });
+      await tx.user.update({
+        where: { id: tokenRow.userId },
+        data: { passwordHash, updatedAt: new Date() },
+      });
+      await tx.$executeRaw`DELETE FROM "session" WHERE sess->>'userId' = ${tokenRow.userId}`;
+    });
 
     return res.json({ message: "Password reset. Sign in with your new password." });
   }
