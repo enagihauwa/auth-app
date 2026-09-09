@@ -15,6 +15,7 @@ import {
 import { validateBody } from "../validate.js";
 import {
   signinLimiter,
+  signinPerIpLimiter,
   signupLimiter,
   forgotLimiter,
   resendLimiter,
@@ -24,6 +25,12 @@ import {
 const router = Router();
 
 const BCRYPT_COST = 12;
+
+// Compared against the supplied password when the email has no account (or no
+// usable hash), so the cost of a bcrypt round is paid either way and sign-in
+// timing cannot reveal whether an email exists. It is never a real credential.
+const DUMMY_PASSWORD_HASH =
+  "$2b$12$hx7uiDgyr0cxi7u3rlLkL.dHlCtq4vP94lUt5aGIFZDgfXx5OZ3Sq";
 
 async function sendVerificationCode(email, userId) {
   const code = await createVerificationCode(userId, {
@@ -166,6 +173,7 @@ router.post(
 router.post(
   "/signin",
   signinLimiter,
+  signinPerIpLimiter,
   validateBody(signinSchema),
   async (req, res) => {
     const { email, password } = req.body;
@@ -175,8 +183,10 @@ router.post(
       select: { id: true, name: true, email: true, passwordHash: true, emailVerifiedAt: true },
     });
 
-    const passwordOk =
-      user && (await bcrypt.compare(password, user.passwordHash));
+    const passwordOk = await bcrypt.compare(
+      password,
+      user && user.passwordHash ? user.passwordHash : DUMMY_PASSWORD_HASH
+    );
 
     if (!user || !passwordOk) {
       return res.status(401).json({ error: "Email or password is incorrect." });

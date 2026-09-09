@@ -8,6 +8,10 @@ import ResetPage from "./pages/ResetPage.jsx";
 import VerifyPage from "./pages/VerifyPage.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import DesignSystemPage from "./pages/DesignSystemPage.jsx";
+import PlansPage from "./pages/PlansPage.jsx";
+import ReturnPage from "./pages/ReturnPage.jsx";
+import BillingPage from "./pages/BillingPage.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import ThemeToggle from "./components/ui/ThemeToggle.jsx";
 
 const AuthContext = createContext(null);
@@ -63,7 +67,7 @@ export default function App() {
     refresh().finally(() => setChecking(false));
   }, [refresh]);
 
-  const value = { user, setUser, refresh };
+  const value = { user, setUser, refresh, checking };
 
   return (
     <AuthContext.Provider value={value}>
@@ -94,6 +98,36 @@ export default function App() {
             <ProtectedRoute>
               <DashboardPage />
             </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/plans"
+          element={
+            <ErrorBoundary>
+              <ProtectedRoute>
+                <PlansPage />
+              </ProtectedRoute>
+            </ErrorBoundary>
+          }
+        />
+        <Route
+          path="/return"
+          element={
+            <ErrorBoundary>
+              <ProtectedRoute>
+                <ReturnPage />
+              </ProtectedRoute>
+            </ErrorBoundary>
+          }
+        />
+        <Route
+          path="/billing"
+          element={
+            <ErrorBoundary>
+              <ProtectedRoute>
+                <BillingPage />
+              </ProtectedRoute>
+            </ErrorBoundary>
           }
         />
         <Route path="/design-system" element={<DesignSystemPage />} />

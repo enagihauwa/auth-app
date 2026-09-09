@@ -4,7 +4,9 @@
 
 This is the **authentication slice** of an app: a user can create an account with an email and password, prove they own the email by entering a six-digit code sent to that address, sign in, see a protected dashboard, sign out, and — if they forget the password — receive a single-use reset link and choose a new one. Every password is stored as a bcrypt hash, every email code and reset token is stored only as its SHA-256 hash, sessions live in Postgres instead of in memory, and every sensitive endpoint is behind both schema validation and rate limits. The client is a small React app (`client/`) whose forms validate with the exact same Zod schemas the server uses, and the server is an Express API (`server/`) that talks to Postgres and sends email through a local SMTP server for development.
 
-Deliberately **not** included: no OAuth or social login, no multi-factor authentication, no roles or permissions (the dashboard is a stub that proves the session works), no account lockout beyond IP rate limiting, no breached-password checks, no subscription/billing, and no async email queue. These are all real features a production auth system eventually needs, but each of them is a separate slice with its own decisions to make, and this slice stays small so the authentication decisions it does make are visible and reviewable. Notably it also ships no user-facing "change my password while logged in" flow and no graceful email-send pipeline; those gaps are named in Section 7.
+Deliberately **not** included: no OAuth or social login, no multi-factor authentication, no roles or permissions (the dashboard is a stub that proves the session works), no account lockout beyond IP rate limiting, no breached-password checks, and no async email queue. These are all real features a production auth system eventually needs, but each of them is a separate slice with its own decisions to make, and this slice stays small so the authentication decisions it does make are visible and reviewable. Notably it also ships no user-facing "change my password while logged in" flow and no graceful email-send pipeline; those gaps are named in Section 7.
+
+**Second slice — subscriptions.** The same two processes now also contain a paid plan: a user on the free plan can open a hosted (simulated) checkout, pay, and be moved to the **Pro** plan monthly or yearly; a monthly Pro user can schedule an upgrade to yearly that is *charged now* at the full yearly price and applied only when the current month ends (no mid-cycle double-billing — the year starts exactly where the month leaves off); a yearly user can schedule a switch to monthly that the server applies when the billing period ends; anyone can cancel and keep Pro until the end of the period, optionally leaving a cancellation reason (a pending paid upgrade blocks cancellation until it applies, since a refund flow is out of scope). The provider side is deliberately mocked in-process — the "payment provider" is a checkout page served by this very server that dispatches signed web- hooks back to it — but the billing logic (idempotent webhook handling, HMAC signature verification, a full payment-event ledger, database-backed subscriptions) is the real thing and would swap to Stripe/Lemon Squeezy by replacing the mock provider module. Everything about the subscription slice is documented in Section 5 and its data model in Section 4; it reuses the Account slice's sessions and `lower(email)` uniqueness without modification.
 
 ## Section 2: How To Run It
 
@@ -78,12 +80,16 @@ Prerequisites: **Node.js 22.18 or later** (the dev scripts use `node --env-file-
 | `DATABASE_URL` | the database you created in step 2 | `postgres://auth_app:auth_app_dev_password@127.0.0.1:5432/auth_db` |
 | `SESSION_SECRET` | you generate it | an insecure dev-only string (fine locally, must be set otherwise) |
 | `APP_URL` | your frontend origin | `http://localhost:5173` |
+| `SERVER_URL` | this server's origin | `http://localhost:3000` |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | your mail server | `127.0.0.1` / `1025` / `false` |
 | `SMTP_USER` / `SMTP_PASS` | your mail server; left empty when no auth | unauthenticated |
 | `MAIL_FROM` | your choice | `Auth App <auth@localhost>` |
 | `VERIFICATION_CODE_TTL_MS` | your choice | `900000` (15 min) |
 | `RESET_TOKEN_TTL_MS` | your choice | `1800000` (30 min) |
 | `RESEND_COOLDOWN_MS` | your choice | `60000` (60 s) |
+| `PAYMENT_WEBHOOK_SECRET` | you generate it | `dev-webhook-secret-change-me` |
+| `CHECKOUT_TTL_MS` | your choice | `1800000` (30 min) |
+| `PRICING_CURRENCY` | your choice | `USD` |
 
 The shipped `.env.example` documents each variable with a comment and holds no real secrets.
 
@@ -199,6 +205,75 @@ CREATE INDEX "IDX_session_expire" ON "session" ("expire");
 
 This is the table `express-session` writes into via `connect-pg-simple`. The browser holds only a random session ID in an `httpOnly` cookie; everything else (whose user, rolling expiry) lives in `sess` in Postgres. `sid` is the primary key because each cookie ID maps to exactly one stored session, and the expiry index is what lets Postgres clean out dead sessions cheaply. `server/src/app.js:15-34` wires it up: `httpOnly`, `sameSite: lax`, `secure` only in production, seven-day lifetime with sliding renewal (`rolling: true`).
 
+### `subscriptions` — one row per user, current entitlement is just `users.plan`
+
+```sql
+CREATE TABLE subscriptions (
+    id                   BIGSERIAL PRIMARY KEY,
+    user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+    status               TEXT NOT NULL DEFAULT 'active',
+    plan                 TEXT NOT NULL DEFAULT 'pro',
+    billing_interval     TEXT NOT NULL,
+    amount_minor         INTEGER NOT NULL,
+    currency             CHAR(3) NOT NULL,
+    period_start         TIMESTAMPTZ(6) NOT NULL,
+    period_end           TIMESTAMPTZ(6) NOT NULL,
+    pending_interval     TEXT,
+    cancel_at_period_end BOOLEAN NOT NULL DEFAULT false,
+    cancelled_at         TIMESTAMPTZ(6),
+    cancellation_reason  TEXT,
+    created_at           TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX subscriptions_user_id_unique ON subscriptions (user_id);
+CREATE INDEX payment_events_user_created ... ; -- see PaymentEvent below
+```
+
+`subscriptions_user_id_unique` makes the "one subscription per user" invariant structural: `upsert` on `user_id` is safe because the database refuses a second row. `users.plan` (`'free'`/`'pro'`) is the single source of truth that feature checks read; the subscription row carries the *terms* (interval, amounts, period, pending-change flags). All money is integer minor units inside `amount_minor` with `currency` as ISO `CHAR(3)` — no floats anywhere, so "what was charged" can never accumulate the classic `0.1 + 0.2` drift.
+
+### `checkout_sessions` — one open payment attempt
+
+```sql
+CREATE TABLE checkout_sessions (
+    id            BIGSERIAL PRIMARY KEY,
+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+    reference     TEXT NOT NULL UNIQUE,
+    plan          TEXT NOT NULL DEFAULT 'pro',
+    billing_interval TEXT NOT NULL,
+    amount_minor  INTEGER NOT NULL,
+    currency      CHAR(3) NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'open',
+    created_at    TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
+    completed_at  TIMESTAMPTZ(6),
+    expires_at    TIMESTAMPTZ(6) NOT NULL
+);
+CREATE INDEX checkout_sessions_user_created ON checkout_sessions (user_id, created_at);
+```
+
+`reference` (`cs_<uuid>`) is what the hosted checkout and the webhook both speak in — the user pays reference `X`, the provider's `payment.captured` names reference `X`, and the server links them. `status` moves `open → completed` (or `failed`/`expired`); an `open` session whose `expires_at` passed is swept by the reaper.
+
+### `payment_events` — the ledger
+
+```sql
+CREATE TABLE payment_events (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE NO ACTION,
+    subscription_id   BIGINT REFERENCES subscriptions(id) ON DELETE SET NULL ON UPDATE NO ACTION,
+    provider_reference TEXT NOT NULL,
+    provider_event_id TEXT,
+    event_type        TEXT NOT NULL,
+    amount_minor      INTEGER NOT NULL,
+    currency          CHAR(3) NOT NULL,
+    data              JSONB,
+    event_key         TEXT UNIQUE,
+    created_at        TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+CREATE INDEX payment_events_user_created ON payment_events (user_id, created_at);
+CREATE INDEX payment_events_provider_reference ON payment_events (provider_reference);
+```
+
+Every meaningful billing transition writes one immutable row: `checkout_initiated`, `payment_verified`, `subscription_fulfilled`, `upgrade_scheduled`, `downgrade_scheduled`, `interval_change_applied`, `cancellation_scheduled`, `subscription_ended`, `checkout_expired`, `payment_failed`, `duplicate_webhook_ignored`. `data` is a JSONB blob carrying the specifics (the applied-at date of a scheduled switch, reasons, the raw provider payload), so the ledger doubles as an audit trail you can reconstruct any charge from. **`event_key` is the idempotency anchor**: the initiation key is `checkout:<reference>` and every verified webhook gets `webhook:<event_id>`. Because the column is unique, the *same* provider event delivered twice cannot write twice — the second delivery hits the unique violation and is logged as `duplicate_webhook_ignored` rather than charged again.
+
 ## Section 5: The Concepts
 
 ### Password hashing with bcrypt
@@ -233,15 +308,15 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 
 - **What it is.** Making the server's answers the same whether an email exists or not, so an outsider cannot learn which addresses have accounts. The trade-off is that legitimate errors get vaguer.
 - **Why it is needed.** Every endpoint that answers "no such user" differently from "wrong password" is a free membership test. That leaks into spam, phishing targeted at real accounts, and credential-stuffing that only spends effort on verified emails. Without it, an attacker runs the `/forgot` route once against a list of emails and learns the whole user table, 5 attempts per hour per IP at a time.
-- **How I implemented it.** Sign-up returns the identical message whether the INSERT succeeded or hit the `23505` unique violation (`server/src/routes/auth.js:56-61`). Forgot-password only branches internally and returns one constant message ("If that email has an account, a reset link is on its way.") (`server/src/routes/auth.js:211-233`). Sign-in uses one message for both unknown email and wrong password — `bcrypt.compare` runs even when the user does not exist, so the response *timing* does not leak either (`server/src/routes/auth.js:185-192`).
+- **How I implemented it.** Sign-up returns the identical message whether the INSERT succeeded or hit the `23505` unique violation (`server/src/routes/auth.js:56-61`). Forgot-password only branches internally and returns one constant message ("If that email has an account, a reset link is on its way.") (`server/src/routes/auth.js:211-233`). Sign-in uses one message for both unknown email and wrong password — `bcrypt.compare` runs against a fixed dummy hash when the user does not exist, so the response *timing* does not leak either (`server/src/routes/auth.js:186-193`).
 - **What I chose against, and why.** Returning distinct errors ("This email is not registered") because the richer UX is the exact mechanism enumeration exploits; with rate limits it would still be a mail-based oracle across many IPs. I also considered rate-limiting strictly per-account; the catch there is that gives the attacker a per-account lockout ability, which is its own abuse, so the accepted outcome is vaguer errors plus per-IP limits.
 
 ### Rate limiting
 
-- **What it is.** Throwing away requests that exceed a per-IP budget inside a time window. This app has per-endpoint limits on signup, sign-in, forgot, and resend, plus one broad limit covering everything.
+- **What it is.** Throwing away requests that exceed a per-sender budget inside a time window. This app has per-endpoint limits on signup, sign-in, forgot, and resend, plus one broad limit covering almost everything.
 - **Why it is needed.** Without it, sign-in is an unthrottled guessing machine: an attacker can throw tens of thousands of guesses a minute, and each attempt costs a bcrypt compare plus a database query on my server. Similarly, `/forgot` and `/signup` become the enumeration oracle from the previous concept (millions of emails per day if unthrottled), and `/resend` becomes a spam cannon against arbitrary inboxes. Rate limits cap the *rate* of all of these.
-- **How I implemented it.** `server/src/rateLimit.js` builds declarative limiters from `express-rate-limit`, mounted per route (`signinLimiter` 10/15 min, `signupLimiter`, `forgotLimiter`, `resendLimiter` 5/hour each) and one `genericLimiter` on the whole API (180/hour) in `server/src/app.js:11`. They return the standard headers so a well-behaved client can back off.
-- **What I chose against, and why.** An in-process store class is the honest default here — but note the consequences: everything resets when the server restarts, and it does not count across multiple server instances. A Redis store becomes mandatory the moment the app runs on more than one process, and that is a deployment task, not a correctness one for a single-node slice, so I accepted the limitation and named it in Section 7. I also chose IP-based identity over account-based, deliberately, to stop attackers from weaponising prolonged lockouts of real users.
+- **How I implemented it.** `server/src/rateLimit.js` builds declarative limiters from `express-rate-limit`, mounted per route in `server/src/routes/auth.js`, plus one `genericLimiter` (180/hour) in `server/src/app.js`. Sign-in is protected by two stacked limits so that throttling abuse *cannot* lock out a legitimate user: a per-account key (`ip + lowercased email`, 20 per 15 min) that uses `skipSuccessfulRequests`, so a correct password or typo recovery never consumes budget, and a broader per-IP safety net (60 per 15 min) that catches someone rotating emails. Forgot and resend are likewise keyed by `ip + email` (5/hour) so several users behind one NAT don't triage each other; sign-up stays per-IP (5/hour). The global cap **excludes** the read-only endpoints the page hits constantly (`/api/health`, `/api/me`, `/api/billing/session/:ref`) so the return page's 2-second payment poll — 30 requests per visit — can never hard-lock a real user out of the whole API. `trust proxy` is config-driven (`TRUST_PROXY`, 0 by default) rather than hard-coded, so a direct-connection deployment never trusts a spoofable `X-Forwarded-For` header as the client IP. All budgets are configurable via `config.rateLimit` with `.env` overrides. Every limiter can be bypassed at runtime from the DB: setting `app_settings.rate_limit_enabled` to `'false'` turns all limits off within ~5 seconds (`server/src/services/settings.js` polls the row; the flag is on by default). This exists for development ergonomics, not production — leaving it `'false'` in a deployed environment disables throttling entirely. They return the standard headers so a well-behaved client can back off.
+- **What I chose against, and why.** An in-process store class is the honest default here — but note the consequences: everything resets when the server restarts, and it does not count across multiple server instances. A Redis store becomes mandatory the moment the app runs on more than one process, and that is a deployment task, not a correctness one for a single-node slice, so I accepted the limitation and named it in Section 7. I also chose IP-based identity over account-based, deliberately, to stop attackers from weaponising prolonged lockouts of real users — the fix in this slice is to *combine* both identities (`ip + email`) and to stop counting successful sign-ins at all.
 
 ### Shared schema validation with Zod (client and server)
 
@@ -284,6 +359,48 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 - **How I implemented it.** Server side, `resendCooldownMs` comes from config (default 60 s) and `/resend` compares the newest live code's `created_at` against `now()` (`server/src/routes/auth.js:153-161`), answering 429 with "wait N seconds". Client side, `VerifyPage.jsx` runs the same 60-second countdown so the button is disabled before the server even sees the request — the server is authoritative, the client merely avoids obvious mistakes.
 - **What I chose against, and why.** Enforcing the cooldown only on the client: anyone can hit the API directly, so the countdown is cosmetic and the server rule is the real one. And a fixed delay-before-send rather than a cooldown — inserting the sleep into the request path would let an attacker tie up a connection per-IP for 60 seconds each, which is a cheap denial-of-service; a cooldown-on-request leaves the connection free.
 
+### Hosted checkout with a simulated provider
+
+- **What it is.** Starting Pro creates a `checkout_sessions` row and returns a URL on the payment provider's domain. The payer is redirected there, completes (or aborts) the payment, and is returned to the app on `/return?ref=…&status=…`. Entitlement is never granted by the redirect — only by the provider's webhook. In this repo the "provider domain" is the same server: `GET /pay/<reference>` (`server/src/routes/mockProvider.js`) renders a minimal hosted page that "charges" `•••• 4242` and both outcomes POST a signed webhook back to `/api/payments/webhook`, then redirect.
+- **Why it is needed.** The redirect must not carry authority: if `/return?status=success` granted Pro, a user could flip the query string. Keeping the *redirect* purely informational and making the *webhook* the only thing that changes `users.plan` is the boundary that separates a real billing system from a lie; the checkout reference (`csrf`-independent, server-generated) is what lets the return page poll the true status via `GET /api/billing/session/:ref`.
+- **How I implemented it.** `POST /api/billing/checkout` (rate-limited by `checkoutLimiter`) computes the amount, reuses a still-open session of the same interval instead of stacking duplicates, and returns `{ url, reference }`. The client redirects with `window.location.assign(url)` — a top-level navigation, so back/refresh land back in the app. `client/src/pages/ReturnPage.jsx` polls every 2 s and shows confirmed / failed / "still waiting, nothing has been charged" states; an `ErrorBoundary` guarantees no blank page regardless of what throws.
+- **What I chose against, and why.** Implementing Stripe in-host `Checkout` inline, or a full payment iframe: the brief calls for a reusable provider abstraction, and the mock captures the *authority boundary* (webhook is king) without needing credentials. Real cards, SCA, and refunds are named as out-of-scope in Section 7.
+
+### Webhook signature verification (HMAC)
+
+- **What it is.** Every provider webhook carries a signature header `x-webhook-signature: t=<ts>,v1=<hex>` where `v1 = HMAC-SHA256(secret, "<ts>.<rawBody>")`. The endpoint re-derives the expected HMAC from the raw body bytes and rejects anything that does not match within a 5-minute timestamp window (`server/src/billing/provider.js`).
+- **Why it is needed.** If the endpoint trusted "a POST to /api/payments/webhook with a body", anyone could grant themselves Pro by POSTing `payment.captured`. A shared secret both parties know, but an attacker must guess, is what lets the server tell "really from the provider" from "curl invented this". Signing the *raw* body (not the parsed JSON) closes the classic whitespace/encoding trick, and the timestamp bounds replay of a captured signature.
+- **How I implemented it.** `express.json` is configured with an `verify` callback that stashes the untouched bytes on `req.rawBody` (`server/src/app.js`); the webhook route verifies `req.rawBody` against the header with `timingSafeEqual` (constant-time compare), then parses. `PAYMENT_WEBHOOK_SECRET` is injected by config; `t` skew is capped at 5 minutes. The mock provider signs with the same function, so the whole loop exercises real cryptography.
+- **What I chose against, and why.** Signature schemes that hash the parsed JSON — parse-order differences across providers make that fragile, and I control the exact raw bytes here. And no re-verification via an out-of-band "you delivered X?" fetch: for a self-hosted mock it is pure ceremony, and it is the kind of thing that must be per-provider in a real integration (Section 7).
+
+### Idempotent webhook processing
+
+- **What it is.** The same provider event delivered twice must produce the same end-state and exactly one charge. The mechanism is a unique `event_key` column: `webhook:<event_id>` exists for at most one `payment_events` row.
+- **Why it is needed.** Webhooks are delivered at-least-once by design — real providers retry on network blips and on 5xx, and a provider's own retry plus a manually replayed event is not rare. Without idempotency, a retried `payment.captured` double-applies: two balance entries, two "payment_verified" rows, a subscription period that jumps twice, and a plan grant that races its own updates.
+- **How I implemented it.** The route first attempts an `insert` with `event_key = 'webhook:<event_id>'` via `logPaymentEvent`; on a `P2002` unique violation it writes a `duplicate_webhook_ignored` row (no key) and returns `{ok:true, duplicate:true}` — the provider sees success, no re-send happens, and nothing is charged or re-granted. A second guard checks the checkout session's `status` (already-`completed` sessions are not re-fulfilled). `checkout_initiated` gets the same treatment with `checkout:<reference>` so two rapid checkout calls cannot double-open for the same user+interval.
+- **What I chose against, and why.** "Last-writer-wins" updates with no ledger: too easy to type-check into a stale write and impossible to audit. A UUID-as-event-id dedupe table maintained by hand — the unique index *is* that table, in the same row as the fact being recorded, which keeps the "insert only if this happened once" atomic instead of a transaction dance.
+
+### Scheduled interval switch (monthly ↔ yearly)
+
+- **What it is.** A monthly subscriber can move to yearly, and a yearly subscriber to monthly, but in both directions the switch is *deferred*: it is recorded as `pending_interval` and the server applies it at the end of the current billing period instead of mid-cycle. A monthly→yearly upgrade additionally *charges now* — the provider captures the full yearly price at checkout, and the year is credited back by starting exactly when the current month ends.
+- **Why it is needed.** An immediate monthly→yearly switch either double-bills the overlap (you've already paid for the rest of this month) or forces a prorated credit for unused days — the classic "what did I pay and why" support question. Deferring the start to the period boundary keeps the maths trivial: one period pays the monthly price, the next period is the full year at the full yearly price, and there is never a fractional charge to explain. It also mirrors the existing yearly→monthly downgrade, which must wait for the next billing boundary anyway (retro-refunding the yearly discount mid-year would be a self-inflicted price gap).
+- **How I implemented it.** `POST /api/billing/checkout` returns the full yearly price for a monthly→yearly request (no proration); the webhook sets `pending_interval = 'year'` on the still-monthly subscription, logs `upgrade_scheduled` with the `appliedAt` = current `period_end`, and clears any pending cancellation (a paid upgrade is a new commitment). The reaper (`server/src/services/reaper.js`, every 60 s) later applies whichever `pending_interval` exists when `period_end` passes, switching interval + price and logging `interval_change_applied`. The yearly→monthly direction is the same field via `POST /api/billing/downgrade`, with `downgrade_scheduled` logged instead. Because a pending upgrade is *paid for*, `POST /api/billing/cancel` refuses it until it applies (the refund flow is explicitly out of scope in Section 7). The E2E proof: monthly checkout captured 1000, the yearly upgrade checkout captured 10000 while the subscription stayed monthly/1000 with `pending_interval = 'year'`, and after the reaper crossed `period_end` the subscription read yearly/10000 with `interval_change_applied` logged.
+- **What I chose against, and why.** Prorating the upgrade and starting the new year immediately: it requires trusting a pro-rata credit and re-reasoning a lower charge, and it overlaps the paid month with the new year. And allowing cancellation while a paid upgrade is pending: without a refund flow it would silently forfeit the prepaid year, so the API refuses it with a clear message rather than lying about the outcome.
+
+### Period-end switches and cancel-at-period-end (the reaper)
+
+- **What it is.** Interval switches in either direction (monthly→yearly and yearly→monthly) and cancellations are all *deferred*: `pending_interval` and `cancel_at_period_end` are stored on the subscription, and an in-process scheduler (`server/src/services/reaper.js`, every 60 s) closes them out when `period_end` passes — switching interval and price, or moving `status → cancelled` + `users.plan → free`, each with a ledger row.
+- **Why it is needed.** Yearly is the discounted offer; letting a mid-year switch to monthly also retro-refund the discount would be a self-inflicted price gap, and the monthly→yearly direction should likewise not double-bill the overlap (Section "Scheduled interval switch"), so switches must wait for the next billing boundary. Cancellation that ended Pro instantly would be a bait-and-switch on "keep access until period end", which is the whole point of `cancel_at_period_end`. A one-row-per-user invariant keeps both semantics expressible as fields plus a timer.
+- **How I implemented it.** The reaper is a `setInterval` (`.unref()`ed so it never holds the process open) that loads due subscriptions and checks `cancel_at_period_end` before `pending_interval` — a cancelled subscription cannot also switch. It is invoked at startup and on the interval; tests drive `runReaper(now)` directly by backdating `period_end`. `pending_interval` is reaper-agnostic to direction: the same code path applies a scheduled yearly upgrade (already paid for at checkout) and a scheduled monthly downgrade.
+- **What I chose against, and why.** Immediate upgrade/downgrade/instant-revoke cancellation: all give the "swindled" user experience for no safety gain. And CRON-style external scheduling: it needs deployment plumbing; an in-process scheduler is honest for a single-node slice and easy to replace (Section 7 names the multi-instance caveat, the same one rate limiting has).
+
+### Money as integer minor units
+
+- **What it is.** `amount_minor` is an integer counting cents/100ths of `currency` (`1000` = `$10.00`); there is no `float` or `numeric`-with-fraction anywhere in billing.
+- **Why it is needed.** Floating-point money is the bug that quietly writes `29.999999999` into a charge or a credit. The moment two different renderings disagree about a cent, an auditor and a bank have a reason to talk to you.
+- **How I implemented it.** The schema is `INTEGER`; pricing lives in `config.pricing` (`month: 1000`, `year: 10000`); period price changes copy the quantised config values verbatim (no derived cents anywhere), and the client only ever formats `(minor/100).toFixed(2)` for display (`client/src/lib/format.js`). All comparison and math is integer.
+- **What I chose against, and why.** `DECIMAL(10,2)` in Postgres: correct too, but Prisma's `Decimal` is awkward to pass through JSON and Zod, and plain integers are the least-bad common denominator for the wire format as well.
+
 ## Section 6: What Went Wrong
 
 **1. Every form broke at runtime: `z.flattenError` does not exist in Zod 3.23.8.**
@@ -310,6 +427,18 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 - **Cause.** A leftover server from an earlier session holding the port; my new process correctly refused to start rather than silently double-binding.
 - **Fix.** Stopped the duplicate attempt and used the already-running instance; as far as the code was concerned this was a non-bug, and the correct behaviour (fail loudly on a conflict) is what any real deployment would demand. Worth documenting because in a long session the "server won't start" symptom most often means "the old one is still up".
 
+**5. The webhook route was mounted under a prefix it could not be reached at.**
+- **Symptom.** The mock provider's post-payment dispatch returned 404: `POST /api/payments/webhook` did not exist.
+- **Investigation.** The billing router defined the route as `router.post("/api/payments/webhook", …)` but `app.use("/api/billing", billingRouter)` mounted the whole router under `/api/billing`, making the real path `/api/billing/api/payments/webhook`. The other billing routes (which began `/checkout`, `/cancel`…) were coincidentally fine because prefixes compose; the webhook path happened to hard-code `/api/payments/…`.
+- **Cause.** Mixing "path written relative to mount point" and "path written as if absolute" in one router; `checkoutUrl`/`dispatchWebhook` pointed at the intended public path.
+- **Fix.** Mounted the billing router at the root (`app.use(billingRouter)`) and wrote every billing route with its full `/api/billing/…` path; the webhook now lives exactly at `/api/payments/webhook`. The E2E re-ran green from checkout through fulfilment.
+
+**6. "No difference detected" vs. Prisma-7 migrate diff heuristics.**
+- **Symptom.** `prisma migrate diff --from-empty --to-schema` printed an *empty* diff even for a schema with four new tables.
+- **Investigation.** In Prisma 7 the empty→schema path outputs nothing unless shadow DB config is coherent; the reliable drift check is `--from-config-datasource --to-schema <schema>`, which correctly reported "No difference detected" against the applied `20240102000000_billing` migration.
+- **Cause.** Tool-behaviour quirk, not a schema gap — but it could mislead at exactly the moment you want to trust migrations.
+- **Fix.** Standardised on the `--from-config-datasource` drift check and verified zero drift after `migrate deploy`; noted in the repo runbook so the trap is not re-hit.
+
 ## Section 7: What This Slice Does Not Handle
 
 - **Multi-instance rate limiting.** The `express-rate-limit` defaults to an in-memory store: limits reset on restart and are per-process. Before real users touch it behind a load balancer, the limits must move to a shared store such as Redis, or the limits become a "one instance per attacker" speed bump rather than a global one.
@@ -321,7 +450,13 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 - **CSRF tokens.** `sameSite: lax` mitigates top-level cross-site POSTs, and the API is JSON-only, but there is no explicit CSRF token. I would add a synchronizer token or double-submit cookie before treating the session as production-hardened.
 - **Verification-code delivery at scale.** Codes and reset links rely on the caller's inbox being reachable; there is no SMS/fallback channel, no "code in the app" path, and no delivery analytics.
 - **Deleted-session and token hygiene.** Sessions are removed explicitly on reset/sign-out; the email code and reset-token tables grow with history because consumed rows are not purged. A scheduled cleanup job would be required at scale (and a partial index keeps the active lookups fast meanwhile).
-- **Out of scope vs. out of time.** Out of scope by design: OAuth/social providers, MFA, roles and permissions, billing, admin tooling, real template rendering. Out of time: none — the slice's own brief is fully implemented and verified; the gaps above are the honest list of what stands between this and a production-login system.
+- **Out of scope vs. out of time.** Out of scope by design: OAuth/social providers, MFA, roles and permissions, admin tooling, real template rendering. Billing is now its own implemented slice (second slice, Section 5) with its own honest gap list below. Out of time: none — each slice's own brief is fully implemented and verified; the gaps above and below are the honest list of what stands between this and a production system.
+- **Billing is mocked, not a live provider.** The "provider" is a page served by this server that signs and dispatches its own webhooks. Real cards, SCA, refunds, chargebacks, plans-as-dynamic-catalog, and a provider dashboard are not implemented; swapping in Stripe/Recharge/Lemon Squeezy means replacing `server/src/billing/provider.js` (the checkout URL / webhook-verify seam) with the real integration and keeping the authority boundary intact.
+- **No PCI scope.** Because no card data is touched — mock provider, no card storage — the app never enters PCI scope. That changes instantly with a real provider, and the choice of *hosted checkout* (as opposed to collecting card details on our form) is what keeps even the future version out of most PCI requirements.
+- **Single-instance scheduler.** The reaper is an in-process `setInterval`: on a multi-replica deployment two instances could both process a due subscription. It is guarded well enough for a single node (idempotent-ish writes per transition), but a real deployment wants a leader election or a DB lock (e.g. `SELECT … FOR UPDATE SKIP LOCKED`) around reaper runs — same caveat as the rate limiter's in-memory store.
+- **No dunning / smart retry.** A failed recurring payment just leaves the period to lapse; there is no retry ladder, no "payment failed" email to the customer, and no grace-period choreography. The first of those matters the moment periods auto-renew for real money.
+- **No cancellation-reactivation or self-serve refunds.** Cancel is one-way (`cancel_at_period_end`); going back means opening a new checkout on a fresh period. A monthly user who has paid for a scheduled yearly upgrade is deliberately blocked from cancelling *until it applies* (the API returns 409) precisely because there is no refund path — undoing that purchase would otherwise forfeit the prepaid year. There is no admin/customer refund flow, which a real business would want before long.
+- **Pricing is code, not catalogue.** Prices live in `config.pricing`, not in the database. Fine for one plan, wrong for a real store; a production build would keep plans/prices in `subscriptions`-adjacent catalogue rows so price changes are data, not deploys.
 
 ## Section 8: If I Built This Again
 
