@@ -5,6 +5,7 @@ import pg from "pg";
 import { prisma } from "./db.js";
 import { config, isProduction } from "./config.js";
 import authRouter from "./routes/auth.js";
+import processingRouter from "./routes/processing.js";
 import { genericLimiter } from "./rateLimit.js";
 
 const app = express();
@@ -44,6 +45,7 @@ app.get("/api/health", (req, res) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/processing", processingRouter);
 
 app.get("/api/me", async (req, res) => {
   if (!req.session?.userId) {

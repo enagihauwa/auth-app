@@ -49,6 +49,23 @@ export default function DashboardPage() {
           <Badge variant="success">Verified</Badge>
         </header>
 
+        <Card>
+          <div className="ui-card__body" style={{ display: "grid", gap: "20px" }}>
+            <div className="stack--sm">
+              <h2 className="type-title-medium">Receipts to expense summaries</h2>
+              <p className="muted">
+                Upload receipt photos, let a background job extract structured expense data through a
+                Gemini model, then summarise the result.
+              </p>
+            </div>
+            <div>
+              <Button type="button" onClick={() => navigate("/upload")}>
+                Upload a receipt
+              </Button>
+            </div>
+          </div>
+        </Card>
+
         <section className="stat-grid">
           <Stat label="Member since" value={memberDate} caption="Account created" />
           <Stat label="Session status" value="Active" caption="Session cookie valid for 7 days" />

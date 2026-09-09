@@ -326,3 +326,202 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 ## Section 8: If I Built This Again
 
 I would take email out of the request path from day one — a queue or background worker that the sign-up, resend, and forgot routes hand messages to and then instantly respond. The single most fragile moment in this whole slice is an awaited `sendMail()` blocking a password-reset or account-creation request; in development it is invisible, but the moment a real or degraded SMTP server is involved, the login delays, the 500s ("account created but we could not send the email"), and the code rows whose email never left become the slice's main source of operational pain. Everything else here — hashing at rest, uniform errors, database-backed sessions, single-use expiring tokens — would be rebuilt with the same decisions; the mail pipeline is the one thing I would not.
+
+---
+
+# Part III — AI-Powered Receipt Extraction
+
+## Section 1: What This Is
+
+This is the **AI-processing slice** of the same app. A signed-in user uploads one or more receipt photos or PDFs; the server stores the bytes in a storage layer, records a processing job in Postgres, and puts that job on an in-process worker queue. A worker picks it up and calls **Google Gemini** through the **official `@google/genai` SDK**, asking the model to return an expense summary as structured JSON, shaped against a schema we provide and then validated a second time by **strict Zod schemas of our own**. The result is stored on the job row, and the client polls until the job is `DONE` or `FAILED`. A finished extract can be followed up with exactly one user-triggered action today — *"Summarise this expense"* — which spawns a child `EDIT` job that reuses the parent's result. Every knob in the slice is changeable: the model id, the concurrency cap, the per-call timeout, the retry count and backoff, the upload limits, and every rate limit are all in `server/src/config.js` or the processing group of `.env.example`. Either role ships a written system prompt with a one-line justification for every model parameter it sets.
+
+Deliberately **not** included: no chatbot or free-text follow-up (the only follow-up is the one summarise button), no editing, sharing, exporting, or persisting of extracted expenses, no human-in-the-loop correction of the extraction, no spending dashboard or per-job token accounting, and no webhooks. The receipts themselves are never stored in the database — only a storage key is — and the model is only ever called with the bytes of the user's own upload plus their role text. There is no landing page and no new account machinery: this slice rides entirely on Assessment 1's sessions and `/api/me` guard.
+
+## Section 2: How To Run It
+
+Everything from Part I's "How To Run It" still applies — same databases, same users, same `npm run dev`. This slice adds one hand-operated secret and one new folder:
+
+1. **Install the new dependencies** (from the repository root): `npm i --prefix server @google/genai multer` — already done in this repo, but a fresh clone needs it.
+2. **Apply the migration.** The processing tables ship in a single migration, `server/prisma/migrations/20240104000000_processing`. It was written to be purely additive (new tables and columns only, nothing renamed or dropped), so `npm run db:migrate` (or `npm --prefix server prisma migrate deploy`) applies it cleanly over any existing history in this repository — it does not assume which earlier migrations were applied first.
+3. **Paste the key by hand.** Create or open `server/.env` and add:
+   ```
+   GEMINI_API_KEY=your_key_from_Google_AI_Studio
+   ```
+   This is the one value a script must never write. The stack deliberately treats "no key configured" as a graceful first-class state: every job FAILS with the message *"paste your GEMINI_API_KEY into server/.env and retry"* rather than crashing, and the UI shows that error. `.env.example` carries a commented placeholder so the shape is documented without holding a secret.
+4. **Run the tests** (`npm --prefix server test`): 15 tests that exercise the service layer with a fake provider, the worker's concurrency cap, storage round-trips, the recovery logic, and the HTTP routes (including 401/400/404/409/413 guarding) against a real Postgres.
+5. **Start the app** as usual (`npm run dev`), sign in, and open `/upload`. Upload a receipt photo and watch the job go PENDING/PROCESSING/DONE; then press "Summarise this expense".
+
+**New environment variables** (all optional; defaults shown):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `GEMINI_API_KEY` | empty | The Google AI Studio key for the model; empty ⇒ jobs FAIL gracefully |
+| `PROCESSING_MODEL_ID` | `gemini-2.5-flash` | The model for both roles |
+| `PROCESSING_CONCURRENCY` | `2` | Max simultaneous model calls in the worker |
+| `PROCESSING_MODEL_TIMEOUT_MS` | `45000` | Abort a model call after this long |
+| `PROCESSING_MAX_ATTEMPTS` | `3` | Retries per job before FAILED |
+| `PROCESSING_RETRY_BACKOFF_MS` | `1500` | Sleep between retries |
+| `PROCESSING_MAX_FILES` / `PROCESSING_MAX_FILE_BYTES` / `PROCESSING_ALLOWED_MIMES` | `6` / `5242880` / `image/jpeg,image/png,image/webp,application/pdf` | Upload envelope checks |
+| `PROCESSING_UPLOAD_LIMIT*`, `PROCESSING_FOLLOWUP_LIMIT*`, `PROCESSING_RETRY_LIMIT*` | `10/15min`, `20/hour`, `5/15min` | Rate limits on the three cost-bearing endpoints |
+
+## Section 3: The Flow, Step By Step
+
+**1. The user uploads.** `client/src/pages/UploadPage.jsx` validates the file list client-side against the same ≤6 files, ≤5 MB, jpeg/png/webp/pdf rules, then `POST`s a `multipart/form-data` `files[]` to `/api/processing/upload` (`server/src/routes/processing.js:92`). `multer` runs in memory with `fileSize`/`files` caps configured from `config.processing.upload`; oversized returns 413, too many returns 400, and any unrecognised type returns 400 — all before a job exists.
+
+**2. A job row is born.** The route creates `processing_jobs` (`kind: EXTRACT`, `status: PENDING`), then for each file: `newStorageKey()` (a namespaced key like `uploads/…`) → `put(key, buffer)` writes bytes to **disk** (`server/src/processing/storage.js`, the local stand-in for object storage) → inserts a `processing_files` row containing only the key and metadata, never the bytes.
+
+**3. Enqueue and return.** `enqueue(job.id)` pushes the id onto the worker's FIFO queue and the route answers `201 {job:{id,status:PENDING}}` immediately. The request never touches the model — that is the whole point of the job/worker split.
+
+**4. The worker claims it.** `server/src/processing/worker.js` pumps the queue while fewer than `config.processing.concurrency` (default 2) jobs are running. `runProcessingJob` (`server/src/processing/service.js:83`) claims the row atomically: `updateMany({ where: { id, status: PENDING }, data: { status: PROCESSING } })`; a claim count of zero means another worker already took it, and the job quietly returns. This is how duplicate claims are impossible.
+
+**5. The model call.** `buildParts` reads the bytes back from storage and hands them to the provider as base64 `inlineData` parts. `server/src/processing/provider.js` wraps the `@google/genai` SDK: model from config (`gemini-2.5-flash`), the role's system prompt, `responseMimeType: "application/json"`, `responseSchema` from the mirror in `server/src/processing/schemas.js`, and the role's `temperature/topP/maxOutputTokens` from `server/src/processing/prompts.js`, with an `AbortController` timeout from `config.processing.modelTimeoutMs`.
+
+**6. Validate, and feed failures back.** The raw payload is parsed with the role's **strict Zod schema**. If it fails, a `ValidationFailureError` records which fields were wrong and that list is appended to the user text of the next attempt ("You returned: … Fix exactly these issues…"), so the retry is not blind. Up to `PROCESSING_MAX_ATTEMPTS`, then the job goes `FAILED` with a human-readable `error`.
+
+**7. The user sees a result.** `client/src/pages/JobViewPage.jsx` polls `GET /api/processing/jobs/:id` every 1200 ms until the status is `DONE` or `FAILED`, then renders the expense card (`ExpenseResult.jsx`) and, on `FAILED`, the exact `error` text from the job row with a Retry button, plus — when done — a "Summarise this expense" button.
+
+**8. The one follow-up.** `POST /api/processing/jobs/:id/follow-up` (`server/src/routes/processing.js:155`) only accepts a `DONE` `EXTRACT` job owned by the caller (404 for anyone else's job, 409 if not finished, 400 if not an extract). It creates a child `EDIT` job with `parentId` and `input: {action:"summarise"}`, enqueues it, and the worker builds the parts from the parent's stored `result` JSON — no re-reading the image, a cheaper text-only call by design. A **Retry** endpoint (`/jobs/:id/retry`, 5/15 min) flips a `FAILED` job back to `PENDING` and requeues it.
+
+## Section 4: The Data Model
+
+### `processing_jobs` — one row per model-backed piece of work
+
+```sql
+CREATE TABLE processing_jobs (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('EXTRACT','EDIT')),
+    status      TEXT NOT NULL DEFAULT 'PENDING'
+                CHECK (status IN ('PENDING','PROCESSING','DONE','FAILED')),
+    input       JSONB,
+    result      JSONB,
+    parent_id   BIGINT REFERENCES processing_jobs(id) ON DELETE SET NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    error       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX processing_jobs_user_id_idx   ON processing_jobs (user_id, status);
+CREATE INDEX processing_jobs_parent_id_idx ON processing_jobs (parent_id);
+```
+
+- `kind`/`status` are constrained **enums in the database**, so an invalid state is un-writable, not just un-reachable. `EXTRACT` turns a batch of files into one expense; `EDIT` runs a follow-up on a parent's `result`.
+- `input`/`result` are `JSONB` because store-and-surf the schema but let the model shape evolve without a DDL migration every week — the *decode* is strict (Zod) even though the *storage* is loose. `input` today only holds `{action}`; `result` holds the validated expense or the edit object.
+- `parent_id` is a self-FK (with `ON DELETE SET NULL`) so an `EDIT` job points at its `EXTRACT` parent without either deleting the other.
+- `attempts` and `error` make retries honest: the client can show "attempt 2 of 3" and the real reason for failure.
+
+### `processing_files` — storage keys only
+
+```sql
+CREATE TABLE processing_files (
+    id            BIGSERIAL PRIMARY KEY,
+    job_id        BIGINT NOT NULL REFERENCES processing_jobs(id) ON DELETE CASCADE,
+    storage_key   TEXT NOT NULL UNIQUE,
+    original_name TEXT NOT NULL,
+    mime_type     TEXT NOT NULL,
+    size_bytes    BIGINT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+- The only durable pointer to a receipt is `storage_key`. The bytes live in the storage layer (`server/src/storage/files/uploads/…` locally, gitignored); if the database leaks, there is no file; if the bucket leaks, there is no metadata. This is the classic object-storage arrangement, re-created for dev.
+- `ON DELETE CASCADE` means deleting a job removes its file rows — the first step toward the orphan-cleanup job named in Section 7.
+- `unique(storage_key)` forbids two jobs claiming the same bytes.
+
+## Section 5: The Concepts
+
+### Structured output: asking for a schema and validating it yourself
+
+- **What it is.** The request tells Gemini `responseMimeType: "application/json"` plus a `responseSchema` (a JSON Schema describing `merchant`, `invoice_date`, `currency`, `total_minor`, line items, …), so the model returns *shaped* JSON instead of prose. Then, after the call, the exact same shape is re-checked with a **strict Zod schema** — a second, independent gate that the SDK does not provide.
+- **Why it is needed.** Raw LLM output in an app's database is how `result.merchant.toUpperCase()` later turns into a 500. A JSON-schema request makes the model *try*, but models still hand back `total_minor` as a string, spell `""` differently from `null`, or drop fields. The responseSchema narrows the target; our own strict parser is the thing that guarantees what lands on the job row actually type-checks.
+- **How I implemented it.** `schemas.js` defines the shape twice, generated side by side: a Zod schema (parsing gate, used by the service) and a mirrored JSON Schema (sent to Gemini). `prompts.js` maps each role to a schema and parameters; `service.js` runs `safeParse` and, on failure, feeds the Zod `issues` back as the next attempt's user text.
+- **What I chose against, and why.** Trusting the model's JSON-schema adherence alone (a single point of failure) and a free-form prompt + flaky parse (the whole risk I want gone). The second gate costs one `safeParse` and removes the entire class of "model said yes, app exploded".
+
+### The official SDK instead of raw HTTP
+
+- **What it is.** `@google/genai` (Google's first-party TypeScript/JS SDK) is the only network client used; there is no hand-rolled `fetch` to `generativelanguage.googleapis.com`.
+- **Why it is needed.** Raw HTTP means hand-maintaining auth headers, retry semantics, content-type plumbing, and every endpoint shape change; the SDK is the interface Google actually versions and tests. It also gives typed request options (`responseSchema`, `systemInstruction`, `abortSignal`) that a JSON blob would smuggle around as un-checked data.
+- **How I implemented it.** One thin wrapper, `server/src/processing/provider.js`, sits between the service and the SDK so tests can substitute a fake. The wrapper owns key lookup, the `AbortController` timeout, the `generateContent` call, and mapping failures onto typed errors (`ProviderNotConfiguredError`, `ProviderTimeoutError`, `ProviderCallError`).
+- **What I chose against, and why.** Raw `fetch`: every "features" thing (structured output, vision parts, system instructions) would be me reimplementing what the SDK already stabilises, for zero benefit. With an interface in front of it, the SDK choice is also the testable choice.
+
+### System vs. user prompts, and defending every parameter
+
+- **What it is.** The system prompt (per role: what the model is, what a receipt is, how to handle missing/violating data) is fixed by the app; the user prompt varies (empty for extraction, or the requested follow-up action, or appended validation feedback on retries). `prompts.js` also lists each model parameter with a one-line justification, e.g. `temperature: 0 // extract — the facts of a receipt are deterministic; 0 stops the model inventing prettier ones`.
+- **Why it is needed.** Every tunable exists because it tunes *something*: `maxOutputTokens` bounds the bill and prevents runaway JSON; `temperature` trades determinism for creativity — appropriate differently for transcription (facts) vs. summarising (a nicer sentence is fine). Documenting the why next to the value keeps the knob from being twiddled into an unexplained "it works" state.
+- **How I implemented it.** `ROLES` in `prompts.js` is the single source; `provider.js` copies `systemInstruction`, and the appropriate `temperature/topP/maxOutputTokens` per role.
+- **What I chose against, and why.** One giant mega-prompt doing both jobs at once: extraction and summarisation have opposite temperature goals, so they are two roles sharing one model id, each with its own prompt and parameters. Separation also means the cheaper text-only follow-up never re-sends images.
+
+### Jobs and workers: background work with the database as source of truth
+
+- **What it is.** Model calls are not done in the request handler. A request creates a `PENDING` job row and returns; a worker later mutates that row `PROCESSING → DONE/FAILED`. Status is the database, not a promise held in memory.
+- **Why it is needed.** Model latency counts in seconds, not milliseconds. Holding an HTTP connection open for the duration makes the client time out, ties up server threads, and turns a model outage into a page error. A job row means the client can bounce, the server can restart, and history survives: the user can refresh `/jobs/:id` any time.
+- **How I implemented it.** Routes only ever `enqueue(job.id)`; `worker.js` runs `runProcessingJob`; `service.js` atomically claims (`updateMany` with status in the WHERE), processes, and persists; `recoverStaleJobs()` on boot marks anything left `PROCESSING` (from a crash) as `FAILED: "…the server restarted…"` and requeues `PENDING` rows.
+- **What I chose against, and why.** Working in the request path (rejected above) and an in-memory wait-list only (loses state on restart — a job the client is polling would never finish). The DB-as-truth design is what makes "status" a durable, queryable fact.
+
+### A queue with a concurrency cap
+
+- **What it is.** A FIFO queue plus a ceiling: `enqueue` pushes job ids, and a pump starts a job only when `running < config.processing.concurrency`. The queue is plain in-memory array, one shared instance per process.
+- **Why it is needed.** Six uploaded files = up to six model calls (plus their retries). Unbounded, that is a burst of parallel paid calls on one upload, and a flood of uploads would exhaust the API quota or the bank balance in one minute. The cap serialises the burst, and the FIFO order keeps a single user's jobs in upload order.
+- **How I implemented it.** `worker.js:dequeueNext()` loops while capacity exists; each completed (or crashed) job decrements `running` and re-pumps. Concurrency is a config value so the cap is tuned without code changes.
+- **What I chose against, and why.** No cap (rejected), a library queue (BullMQ + Redis) — a real deployment would justify it, but for a single-process slice a hand-rolled FIFO gives the same behaviour with a tenth of the machinery; the trade is named in Section 7. A concurrency *cap* rather than a throughput *rate-limiter* because the model provider is the scarce resource, not wall-clock time.
+
+### Rate limiting as cost control
+
+- **What it is.** The three endpoints that carry cost are limited per IP: `upload` 10 per 15 min, `follow-up` 20 per hour, `retry` 5 per 15 min (all configurable), reusing the same `express-rate-limit` helpers as Part I.
+- **Why it is needed.** Part I's rate limits were about abuse (enumeration, lockout, spam). Here they are **cost control**: every upload is a paid model call with up to three attempts, so one careless client can spend real money. The limit turns "upload 10,000 receipts to try your luck" into "upload 10 in 15 minutes".
+- **How I implemented it.** `server/src/rateLimit.js` exports the three limiter factories wired into `routes/processing.js`, with limits read from `config.processing.rateLimits`.
+- **What I chose against, and why.** Per-user limits instead of per-IP: a shared-key account would then be weaponisable (any uploads under your key cost you); the in-memory store caveat from Part I applies unchanged.
+
+### Objects on disk, keys in Postgres
+
+- **What it is.** Uploaded bytes go to a storage layer (`storage.js`) with a `put/get/delete` interface; locally that is the gitignored `server/storage/` folder, and the file is reachable only by its unique key, which is the only thing stored in `processing_files`.
+- **Why it is needed.** Storing binary blobs in Postgres bloats backups and every row read. The filesystem-as-object-store keeps the database queryable at a couple of rows per receipt, and the *interface* (`storage.js`) is the seam at which a real bucket would plug in with zero changes to jobs, routes, or tests.
+- **How I implemented it.** `newStorageKey()` mints `uploads/<random>` names; the upload route `put`s bytes before the `processing_files` row; `buildParts` `get`s them back at processing time.
+- **What I chose against, and why.** Storing bytes as `BYTEA` columns (bloat, no streaming, no CDN) and magic paths duplicated across the code (everything goes through the storage module, and `.gitignore` keeps dev blobs out of the repo — a real bucket would also never ship secrets).
+
+### Timeouts with a defined fallback
+
+- **What it is.** Every model call is wrapped in an `AbortController` armed with `config.processing.modelTimeoutMs` (45 s). On timeout the call throws `ProviderTimeoutError`; the service sleeps `retryBackoffMs` and retries up to `maxAttempts`; then the job is marked `FAILED` with "…timed out…", and the user can hit Retry.
+- **Why it is needed.** A model call that hangs must not hang the worker forever: one stuck call occupies a concurrency slot, and a deadline keeps the whole pipeline responsive. Equally important, the failure *path* is defined, not emergent — the UI shows the error, Retry works, and no state is corrupt.
+- **How I implemented it.** `provider.js` builds the controller and races SDK call against it; `service.js` classifies errors (timeout / not-configured / call failed) and decides retry-vs-fail by the same rules for each.
+- **What I chose against, and why.** An infinite retry (bills forever; hides real failures) and failing the job on first error (a transient 5xx spike would be user-visible noise). Three attempts with backoff is the middle ground: resilient, bounded, honest.
+
+### What one run costs, and what caps the total
+
+- **What it is.** `gemini-2.5-flash` is priced per token (approx. $0.30 per million **input** tokens and $2.50 per million **output** tokens; images are billed as input tokens). A typical one-page receipt image with a ~500-token system prompt lands around 1,000–3,000 input tokens, and the JSON it returns is ~150–300 tokens — so an extract costs **on the order of $0.0001–$0.001** (a fraction of a US cent, dominated by output). The summarise follow-up is text-only and cheaper. The **free tier** of Google AI Studio also gives a daily allowance of `gemini-2.5-flash` calls, so for development the total is usually $0. (Confirm current per-token figures on the pricing page — this is an order-of-magnitude, not an invoice.)
+- **Why it is needed.** "How much does this feature cost" is the question that should be answerable from the code; if it is not, nobody will be able to say whether the feature is profitable or a fire hazard.
+- **How it is capped.** The levers are all here: per-endpoint rate limits (10 uploads/15 min), the concurrency cap (2 parallel calls), `maxAttempts` + backoff (a pathological receipt costs at most 3 calls), the free-tier daily quota, and `maxOutputTokens` per role. Nothing separately hard-stops spending if all knobs are loosened — that is the honest cap list, and it is mostly the request limits.
+- **What I chose against, and why.** Instrumenting per-job token counts from the SDK response and a budget alarm. That is the *right* eventual addition (I named it in Section 8) but it was more surface than this slice needed when the rate limits already bound the worst case by three orders of magnitude.
+
+## Section 6: What Went Wrong
+
+**1. `prisma migrate dev` was unusable: P3014 shadow-database permission denied.**
+- **Symptom.** `npm --prefix server exec -- prisma migrate dev --create-only` failed with `P3014: error: permission denied for database "…shadow…"` — the local role could not create databases, which `migrate dev`'s shadow database needs.
+- **Fix.** I don't need `migrate dev` to generate a migration if I can produce the SQL myself. `prisma migrate diff --config server/prisma.config.ts --from-config-datasource --to-schema server/prisma/schema.prisma --script` diffs the live dev database (which already has all prior migrations) against the new schema and prints the delta. I reviewed that delta for safety and hand-wrote one deliberately **additive** migration — only `CREATE TABLE`s and one `ADD COLUMN`, nothing destructive — so it applies identically regardless of whether this branch lands on master or after the billing branch's history. Recorded it with `prisma migrate resolve --applied` and `migrate deploy` applied it to the dev DB. The additive rule is the real takeaway: for a repo whose branches carry competing migrations, "merges cleanly everywhere" is a property of the migration, not of luck.
+
+**2. The `--from-migrations` and `--from-empty` diff variants silently produced nothing on Windows.**
+- **Symptom.** `prisma migrate diff --from-migrations …` returned an empty diff even though the schema had clearly changed, and `--from-empty …` did the same; only `--from-config-datasource` produced real SQL.
+- **Fix.** Stopped trying the broken variants and standardised on `--from-config-datasource` (diff live-DB vs. schema). Recorded here because "the diff is empty but I added tables!" is a silent trap that reads as "I forgot to save the file".
+
+**3. PowerShell and npm ergonomics ate about as much time as the feature itself.**
+- **Symptom.** `npm` sometimes did not run at all (PowerShell blocks `npm.ps1`; the command is `npm.cmd`); `npm exec prisma …` swallowed flags (answers come only with `--` or via `npm run` scripts); and a one-liner containing `@{u}` failed because PowerShell parses `@{u}` as a **hash-literal** rather than a brace-tagged argument.
+- **Fix.** Portability notes in the wire protocol of my memory: use `npm.cmd`, use `npm run` scripts or explicit `--` for CLI flags, and quote any argument that looks like `@{…}`. Nothing about the application itself — a reminder that the shell is part of the engineering surface.
+
+**4. The test suite tripped on the real database's constraints and the real auth flow.**
+- **Symptom.** Three separate rounds of failures: (a) creating test users failed with `23514` — the `users.password_hash` bcrypt **check constraint** rejected my `"x".repeat(60)` placeholder (so I hash a real bcrypt at runtime); (b) the "retry with validation feedback" test never saw attempt 2, because my fake provider was being **re-constructed on every call**, resetting its call counter so it returned the bad output forever; (c) hand-forged session cookies were rejected, then `/api/auth/login` 404'd — the real route is `/api/auth/signin`.
+- **Fix.** Hash passwords with the repo's `bcrypt`, construct the fake provider once per test, and obtain a session cookie the honest way: `POST /api/auth/signin` with known credentials, exactly as a browser would.
+- **Lesson.** Each of these was a *test-harness* bug, but (a) and (c) were only possible because the harness bypassed real constraints; the moment tests treat production's invariants as part of the system under test, both bugs become features.
+
+## Section 7: What This Slice Does Not Handle
+
+- **Single-process worker.** The queue lives in the same Node process as the API, capped at `PROCESSING_CONCURRENCY`. Two server instances are two independent queues, each issuing their own model calls. A real deployment must run exactly one worker (or move the queue to Postgres/Redis); similarly, `recoverStaleJobs` runs only at boot, so a job stuck mid-`PROCESSING` on a long-lived single process is not rescued until restart. The honest flip side of the FIFO cap is that all of this is per-process.
+- **No hard spend budget.** Rate limits + concurrency + free-tier quota bound the blast radius, but there is no daily budget alarm and no per-job token accounting, and a pathological receipt with three attempts costs three calls. Spending instrumentation belongs before real money flows.
+- **Files have no lifecycle.** Bytes written on upload stay on disk even after the job is `FAILED` or long finished; there is no orphan sweep, versioning, signed URLs, or retention policy. `storage.js` is the documented local stand-in — swap its `put/get/delete` for GCS/S3 and the rest of the slice does not change.
+- **The model is a black box with no verification net.** Extraction is best-effort: nothing re-adds the line items to confirm they sum to `total_minor`, and a blurry or rotated receipt can fail or pass silently with wrong numbers. There is no human-in-the-loop correction UI.
+- **PDFs and big images are best-effort.** Multi-page, very high-resolution PDFs can exceed the input window and fail; the 5 MB envelope is a size limit, not a resolution guarantee.
+- **Exactly one follow-up (summarise).** No chat, no editing or saving extracted expenses, no export, no webhooks. The `EDIT` slot is a door, not a feature set.
+- **The key is a human act.** `GEMINI_API_KEY` pasted by hand into `.env`; until then every job fails with a *clear* message, and there is no key versioning/rotation — changing the key is an edit + restart.
+
+## Section 8: If I Built This Again
+
+I would start with the worker **out of process and backed by a real queue** — a Postgres-polling lightweight worker or Redis-backed BullMQ — and only then the API. The in-process FIFO was the correct size for this slice, but the first production step is detaching model calls from the API's lifetime and making concurrency *"how many workers exist"* instead of *"a config number inside one process"*, which is also where the per-spend instrumentation belongs. Second, I would **schema-version the JSONB results** (a `schema_version` column from day one): the Zod schemas will evolve, and old `result` rows currently promise a shape they may not keep. Third, I would keep the two things that held up especially well — the provider **interface** that let me test the whole service against a fake model, and **structured output plus our own strict validation** as an explicit two-gate design; those two decisions are the difference between this slice being testable and being a demo. Last, files: into a real bucket with signed URLs and a retention rule from the start, because the storage seam is exactly where production surprises hide.
