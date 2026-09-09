@@ -239,6 +239,25 @@
   letter-spacing: 0.35em;
 }
 
+.ui-select {
+  width: 100%;
+  height: 40px;
+  padding: 0 var(--spacing-collection-medium-spacing);
+  background: var(--colour-roles-surface-container-lowest);
+  color: var(--colour-roles-on-surface);
+  border: 1px solid var(--colour-roles-outline);
+  border-radius: 8px;
+  font-size: var(--typography-body-large-fontsize);
+  line-height: var(--typography-body-large-lineheight);
+}
+
+.ui-select:focus-visible {
+  outline: none;
+  border-color: var(--colour-roles-primary);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--colour-roles-primary) 25%, transparent);
+}
+
 .ui-hint {
   font-size: var(--typography-body-small-fontsize);
   line-height: var(--typography-body-small-lineheight);
@@ -848,4 +867,95 @@
   .ui-nav {
     padding: var(--spacing-collection-medium-spacing) var(--spacing-collection-base-spacing);
   }
+}
+
+/* --- Billing shell --- */
+
+.billing-wrap {
+  width: min(100% - 2rem, 52rem);
+  margin-inline: auto;
+  padding: var(--spacing-collection-very-large-spacing) 0;
+  display: grid;
+  gap: var(--spacing-collection-base-spacing);
+}
+
+.billing-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-collection-small-spacing);
+}
+
+.billing-nav__link {
+  padding: var(--spacing-collection-small-spacing) var(--spacing-collection-base-spacing);
+  border-radius: 8px;
+  color: var(--colour-roles-on-surface);
+  font-weight: var(--typography-label-large-fontweight);
+}
+
+.billing-nav__link:hover {
+  background: var(--colour-roles-surface-container);
+  text-decoration: none;
+}
+
+.billing-nav__link--active {
+  background: var(--colour-roles-primary-container);
+  color: var(--colour-roles-on-primary-container);
+}
+
+/* --- Plans --- */
+
+.plans-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--spacing-collection-base-spacing);
+}
+
+.plan-card {
+  border-radius: 12px;
+  border-color: var(--colour-roles-outline-variant);
+}
+
+.plan-card--current {
+  border-color: var(--colour-roles-primary);
+  box-shadow: 0 0 0 1px var(--colour-roles-primary);
+}
+
+.plan-card__body {
+  padding: var(--spacing-collection-extra-large-spacing) var(--spacing-collection-large-spacing);
+  display: grid;
+  gap: var(--spacing-collection-base-spacing);
+  height: 100%;
+  align-content: start;
+}
+
+.plan-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-collection-small-spacing);
+  flex-wrap: wrap;
+}
+
+.plan-card__price {
+  font-weight: 700;
+}
+
+.plan-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--spacing-collection-small-spacing);
+}
+
+.plan-card__list li::before {
+  content: "✓ ";
+  color: var(--colour-roles-primary);
+  font-weight: 700;
+}
+
+.plan-card__actions {
+  margin-top: auto;
+  padding-top: var(--spacing-collection-base-spacing);
 }

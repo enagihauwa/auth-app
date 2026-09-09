@@ -70,7 +70,14 @@ export default function DashboardPage() {
               <StatusIndicator tone="success">Email verified</StatusIndicator>
             </div>
             <hr className="divider" />
-            <div>
+            <div className="flex-row" style={{ gap: "12px" }}>
+              <Button
+                type="button"
+                variant="primary"
+                onClick={() => navigate("/billing")}
+              >
+                Billing &amp; plan
+              </Button>
               <Button
                 type="button"
                 variant="outline"
