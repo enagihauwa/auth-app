@@ -95,7 +95,7 @@ The shipped `.env.example` documents each variable with a comment and holds no r
 
 In `server/src/routes/auth.js` the `/signup` route:
 - runs `signupLimiter` (5 per hour per IP) and `validateBody(signupSchema)`;
-- hashes the password with bcrypt, cost 12 (`server/src/routes/auth.js:44`);
+- hashes the password with bcrypt, cost 12 (`server/src/routes/auth.js:57`);
 - inserts the user, catching the `23505` unique-violation error on `lower(email)` and answering with a deliberately identical generic success message so nobody can use signup to probe which emails exist;
 - creates a six-digit code through `createVerificationCode` (`server/src/services/tokens.js`), which stores `sha256(code)` — never the code itself — with a 15-minute expiry;
 - sends the email via `server/src/mailer.js` (nodemailer → Mailpit);
@@ -205,7 +205,7 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 
 - **What it is.** Hashing turns a password into a fixed-length string that cannot be reversed back into the plaintext. On account creation I compute `bcrypt.hash(password, 12)`; on sign-in I run `bcrypt.compare` against the stored hash. The real password is never stored or logged anywhere.
 - **Why it is needed.** If the database is ever read by someone who should not have it, plaintext passwords give that person every account immediately — and, because people reuse passwords, the same credentials across other services. Even a stolen hash is useful, so the point is to make the stored form deliberately slow to brute-force.
-- **How I implemented it.** `server/src/routes/auth.js:44` hashes at signup and at password reset; `server/src/routes/auth.js:187-190` compares on sign-in. The cost factor 12 is the deliberate slowdown — it costs one honest login a few hundred milliseconds and costs an attacker the same time per guess. The database refuses mismatched formats outright:
+- **How I implemented it.** `server/src/routes/auth.js:57` hashes at signup and `server/src/routes/auth.js:275` at password reset; `server/src/routes/auth.js:199-200` compares on sign-in. The cost factor 12 is the deliberate slowdown — it costs one honest login a few hundred milliseconds and costs an attacker the same time per guess. The database refuses mismatched formats outright:
 
   ```sql
   CONSTRAINT users_password_hash_is_bcrypt
@@ -233,7 +233,7 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 
 - **What it is.** Making the server's answers the same whether an email exists or not, so an outsider cannot learn which addresses have accounts. The trade-off is that legitimate errors get vaguer.
 - **Why it is needed.** Every endpoint that answers "no such user" differently from "wrong password" is a free membership test. That leaks into spam, phishing targeted at real accounts, and credential-stuffing that only spends effort on verified emails. Without it, an attacker runs the `/forgot` route once against a list of emails and learns the whole user table, 5 attempts per hour per IP at a time.
-- **How I implemented it.** Sign-up returns the identical message whether the INSERT succeeded or hit the `23505` unique violation (`server/src/routes/auth.js:56-61`). Forgot-password only branches internally and returns one constant message ("If that email has an account, a reset link is on its way.") (`server/src/routes/auth.js:211-233`). Sign-in uses one message for both unknown email and wrong password — `bcrypt.compare` runs even when the user does not exist, so the response *timing* does not leak either (`server/src/routes/auth.js:185-192`).
+- **How I implemented it.** Sign-up returns the identical message whether the INSERT succeeded or hit the `23505` unique violation (`server/src/routes/auth.js:67-74`). Forgot-password only branches internally and returns one constant message ("If that email has an account, a reset link is on its way.") (`server/src/routes/auth.js:226-249`). Sign-in uses one message for both unknown email and wrong password — `bcrypt.compare` runs even when the user does not exist, so the response *timing* does not leak either (`server/src/routes/auth.js:199-204`).
 - **What I chose against, and why.** Returning distinct errors ("This email is not registered") because the richer UX is the exact mechanism enumeration exploits; with rate limits it would still be a mail-based oracle across many IPs. I also considered rate-limiting strictly per-account; the catch there is that gives the attacker a per-account lockout ability, which is its own abuse, so the accepted outcome is vaguer errors plus per-IP limits.
 
 ### Rate limiting
@@ -281,7 +281,7 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 
 - **What it is.** A 60-second window after a code is sent before the same user can request another one, enforced on the client (a visible countdown) and, more importantly, on the server (in `/resend`, versus the code row's `created_at`).
 - **Why it is needed.** Without a cooldown, the resend route is a free spam relay: call it in a loop and Mailpit (or, in production, a real provider) receives an unlimited stream of emails to one address; with a per-user limit but no cooldown, typo-driven double-clicks would also burn through the hourly budget instantly. A cooldown bounds blast-radius without asking the mail provider for help.
-- **How I implemented it.** Server side, `resendCooldownMs` comes from config (default 60 s) and `/resend` compares the newest live code's `created_at` against `now()` (`server/src/routes/auth.js:153-161`), answering 429 with "wait N seconds". Client side, `VerifyPage.jsx` runs the same 60-second countdown so the button is disabled before the server even sees the request — the server is authoritative, the client merely avoids obvious mistakes.
+- **How I implemented it.** Server side, `resendCooldownMs` comes from config (default 60 s) and `/resend` compares the newest code's `created_at` against `now()` (`server/src/routes/auth.js:163-176`), answering 429 with "wait N seconds". Because issuing a new code consumes every older one in the same transaction, the newest row *is* the live one, so the query does not need to filter consumed/expired rows. Client side, `VerifyPage.jsx` runs the same 60-second countdown so the button is disabled before the server even sees the request — the server is authoritative, the client merely avoids obvious mistakes.
 - **What I chose against, and why.** Enforcing the cooldown only on the client: anyone can hit the API directly, so the countdown is cosmetic and the server rule is the real one. And a fixed delay-before-send rather than a cooldown — inserting the sleep into the request path would let an attacker tie up a connection per-IP for 60 seconds each, which is a cheap denial-of-service; a cooldown-on-request leaves the connection free.
 
 ## Section 6: What Went Wrong
@@ -309,6 +309,18 @@ This is the table `express-session` writes into via `connect-pg-simple`. The bro
 - **Investigation.** I checked what was listening on 3000 and whether the process was ours; the division was between my process and one already started earlier with `--watch` from a previous session, which had reloaded and kept serving.
 - **Cause.** A leftover server from an earlier session holding the port; my new process correctly refused to start rather than silently double-binding.
 - **Fix.** Stopped the duplicate attempt and used the already-running instance; as far as the code was concerned this was a non-bug, and the correct behaviour (fail loudly on a conflict) is what any real deployment would demand. Worth documenting because in a long session the "server won't start" symptom most often means "the old one is still up".
+
+**5. Requesting a second verification code killed the server: `P2002 … one_active_per_user`.**
+- **Symptom.** Any path that issued a new code for a user who already had a live one — sign-up of a stuck account, or `/api/auth/resend` after the cooldown — threw `PrismaClientKnownRequestError: Unique constraint failed on the constraint "email_verification_codes_one_active_per_user"`. Because no route caught it, the error escaped the request handler, the API process died, and the Vite proxy logged `ECONNRESET`/`ECONNREFUSED` until the watcher restarted — meanwhile Mailpit sat empty.
+- **Investigation.** The partial unique index `email_verification_codes_one_active_per_user(user_id) WHERE consumed_at IS NULL` (Section 4) is deliberate: one user may have at most one *live* code. But the only `INSERT` to that table lived inside `createVerificationCode`, and the code that retires the old row lived in the `/resend` route — a `updateMany(… consumed_at = now() …)` in exactly one caller. Putting the invariant in the database and the enforcement in one route meant every *other* code-issuing path was a time bomb.
+- **Cause.** A helper named `create` that did not describe its real contract ("create the *only* live code for this user"). The caller did the retiring; the moment a second caller appeared, the constraint — doing its job — surfaced as a crash instead of a handled transition.
+- **Fix.** The invariant now lives with the insert. `createVerificationCode` runs one transaction: `updateMany({ where: { userId, consumedAt: null }, data: { consumedAt: now } })` then `create` (`server/src/services/tokens.js:16-33`), so the constraint can never be tripped regardless of caller. `createResetToken` got the same shape (`server/src/services/tokens.js:35-52`): reset tokens have no partial index so they could legally stack, but superseding an unconsumed token is the same single-use decision and one code path. I also wrapped every auth route handler in `try/catch (err) { next(err) }` so a future unhandled rejection surfaces as a 500 to that one request instead of crashing the process. `server/test-auth.mjs` pins all of it under `node --test`.
+
+**6. Just-signed-in users were sometimes bounced back to sign-in: the response beat the session row.**
+- **Symptom.** Intermittently, a fresh sign-in or verification redirected to the dashboard once and then `/api/me` answered 401 — the user was "signed in" and then, one refresh later, anonymous.
+- **Investigation.** `connect-pg-simple` writes the session asynchronously: `req.session.userId = user.id` only mutates the in-memory `req.session`, and the Postgres row appears when `session.save()` resolves. `/signin` and `/verify` were calling `res.json` immediately, before the write completed, so a `GET /api/me` that raced the save could legitimately find no row and answer 401.
+- **Cause.** Responding before the state change was durable — the classic write-behind response saying "done" while the effect is still in flight.
+- **Fix.** A small `persistSession(req, res)` helper awaits `req.session.save()` before the response is sent, and both `/signin` and `/verify` use it (`server/src/routes/auth.js:28-38`, `:136`, `:215`). A successful "Signed in." now implies the session row already exists; the helper is also the single place to adjust if the store grows strict semantics.
 
 ## Section 7: What This Slice Does Not Handle
 
@@ -511,6 +523,12 @@ CREATE TABLE processing_files (
 - **Symptom.** Three separate rounds of failures: (a) creating test users failed with `23514` — the `users.password_hash` bcrypt **check constraint** rejected my `"x".repeat(60)` placeholder (so I hash a real bcrypt at runtime); (b) the "retry with validation feedback" test never saw attempt 2, because my fake provider was being **re-constructed on every call**, resetting its call counter so it returned the bad output forever; (c) hand-forged session cookies were rejected, then `/api/auth/login` 404'd — the real route is `/api/auth/signin`.
 - **Fix.** Hash passwords with the repo's `bcrypt`, construct the fake provider once per test, and obtain a session cookie the honest way: `POST /api/auth/signin` with known credentials, exactly as a browser would.
 - **Lesson.** Each of these was a *test-harness* bug, but (a) and (c) were only possible because the harness bypassed real constraints; the moment tests treat production's invariants as part of the system under test, both bugs become features.
+
+**5. A done job failed anyway: the model wrapped its JSON in a markdown code fence.**
+- **Symptom.** A job with a visibly complete expense object in the response `Text` was marked `FAILED` with "The model returned something that is not valid JSON".
+- **Investigation.** The provider did a bare `JSON.parse(text)`. Against the real API, some responses arrived as ```` ```json\n{…}\n``` ```` — perfectly valid markdown, not valid JSON input. `responseMimeType: "application/json"` makes that rare, but the seam where a typed response stops being byte-for-byte JSON is exactly where a flaky model/API pair fails.
+- **Cause.** Trusting a JSON-typed response to *be* JSON. Models occasionally decorate even JSON-typed output with fences or a sentence of prose.
+- **Fix.** `generateStructured` now trims the text, strips a leading ```` ```json ````/```` ``` ```` fence and any trailing ```` ``` ```` before `JSON.parse` (`server/src/processing/provider.js:102-109`). The failure path stays, unchanged: a response that is genuinely not JSON still fails loudly — the trim only stops the parser from being wrong about a well-formed one.
 
 ## Section 7: What This Slice Does Not Handle
 
