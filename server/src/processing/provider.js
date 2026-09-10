@@ -99,8 +99,15 @@ export async function generateStructured({
   }
 
   try {
-    return JSON.parse(text);
+    // Models sometimes wrap the JSON in markdown code fences or add prose around it.
+    const normalized = text
+      .trim()
+      .replace(/^```(?:json)?\s*\r?\n?/i, "")
+      .replace(/\r?\n?```\s*$/, "");
+    return JSON.parse(normalized);
   } catch {
-    throw new ProviderCallError(`The model returned something that is not valid JSON (${role}).`);
+    throw new ProviderCallError(
+      `The model returned something that is not valid JSON (${role}).`,
+    );
   }
 }

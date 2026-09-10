@@ -1,4 +1,4 @@
-// Two roles, one model (config.processing.modelId, default gemini-2.5-flash):
+// Two roles, one model (config.processing.modelId, default gemini-3.6-flash):
 //   extract — vision model turns receipt images into structured expense data.
 //   edit    — text model turns that structured data into a human summary (follow-up action).
 // Every parameter set below is justified in one line in `paramJustification`.

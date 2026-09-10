@@ -24,7 +24,7 @@ export const config = {
     geminiApiKey: process.env.GEMINI_API_KEY ?? "",
   },
   processing: {
-    modelId: process.env.PROCESSING_MODEL_ID ?? "gemini-2.5-flash",
+    modelId: process.env.PROCESSING_MODEL_ID ?? "gemini-3.6-flash",
     concurrency: Number(process.env.PROCESSING_CONCURRENCY ?? 2),
     modelTimeoutMs: Number(process.env.PROCESSING_MODEL_TIMEOUT_MS ?? 45 * 1000),
     maxAttempts: Number(process.env.PROCESSING_MAX_ATTEMPTS ?? 3),

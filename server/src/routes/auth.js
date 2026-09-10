@@ -25,6 +25,18 @@ const router = Router();
 
 const BCRYPT_COST = 12;
 
+function persistSession(req, res) {
+  return new Promise((resolve) => {
+    req.session.save((err) => {
+      if (err) {
+        console.error("Failed to persist session", err);
+        return res.status(500).json({ error: "Could not sign you in." });
+      }
+      resolve();
+    });
+  });
+}
+
 async function sendVerificationCode(email, userId) {
   const code = await createVerificationCode(userId, {
     ttlMs: config.timings.verificationCodeTtlMs,
@@ -116,6 +128,7 @@ router.post(
     ]);
 
     req.session.userId = user.id;
+    await persistSession(req, res);
     return res.json({ message: "Email verified. You are signed in." });
   }
 );
@@ -191,6 +204,7 @@ router.post(
     }
 
     req.session.userId = user.id;
+    await persistSession(req, res);
     return res.json({ message: "Signed in." });
   }
 );
