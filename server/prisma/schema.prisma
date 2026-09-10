@@ -15,13 +15,78 @@ model User {
   email             String
   passwordHash      String                @map("password_hash")
   emailVerifiedAt   DateTime?             @map("email_verified_at") @db.Timestamptz(6)
+  plan              String                @default("free")
   createdAt         DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime              @default(now()) @map("updated_at") @db.Timestamptz(6)
   verificationCodes EmailVerificationCode[]
   resetTokens       PasswordResetToken[]
+  subscription      Subscription?
+  checkoutSessions  CheckoutSession[]
+  paymentEvents     PaymentEvent[]
   processingJobs    ProcessingJob[]
 
   @@map("users")
+}
+
+model Subscription {
+  id                 BigInt            @id @default(autoincrement())
+  userId             String            @map("user_id") @db.Uuid
+  status             String            @default("active")
+  plan               String            @default("pro")
+  interval           String            @map("billing_interval")
+  amountMinor        Int               @map("amount_minor")
+  currency           String            @map("currency") @db.Char(3)
+  periodStart        DateTime          @map("period_start") @db.Timestamptz(6)
+  periodEnd          DateTime          @map("period_end") @db.Timestamptz(6)
+  pendingInterval    String?           @map("pending_interval")
+  cancelAtPeriodEnd  Boolean           @default(false) @map("cancel_at_period_end")
+  cancelledAt        DateTime?         @map("cancelled_at") @db.Timestamptz(6)
+  cancellationReason String?           @map("cancellation_reason")
+  createdAt          DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime          @default(now()) @map("updated_at") @db.Timestamptz(6)
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  events             PaymentEvent[]
+
+  @@unique([userId], map: "subscriptions_user_id_unique")
+  @@map("subscriptions")
+}
+
+model CheckoutSession {
+  id            BigInt             @id @default(autoincrement())
+  userId        String             @map("user_id") @db.Uuid
+  reference     String             @unique
+  plan          String             @default("pro")
+  interval      String             @map("billing_interval")
+  amountMinor   Int                @map("amount_minor")
+  currency      String             @map("currency") @db.Char(3)
+  status        String             @default("open")
+  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt   DateTime?          @map("completed_at") @db.Timestamptz(6)
+  expiresAt     DateTime           @map("expires_at") @db.Timestamptz(6)
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([userId, createdAt], map: "checkout_sessions_user_created")
+  @@map("checkout_sessions")
+}
+
+model PaymentEvent {
+  id                BigInt        @id @default(autoincrement())
+  userId            String        @map("user_id") @db.Uuid
+  subscriptionId    BigInt?       @map("subscription_id")
+  providerReference String        @map("provider_reference")
+  providerEventId   String?       @map("provider_event_id")
+  eventType         String        @map("event_type")
+  amountMinor       Int           @map("amount_minor")
+  currency          String        @map("currency") @db.Char(3)
+  data              Json?
+  eventKey          String?       @unique @map("event_key")
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  subscription      Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([userId, createdAt], map: "payment_events_user_created")
+  @@index([providerReference], map: "payment_events_provider_reference")
+  @@map("payment_events")
 }
 
 model EmailVerificationCode {
@@ -47,6 +112,14 @@ model PasswordResetToken {
 
   @@unique([tokenHash], map: "password_reset_tokens_token_hash_unique")
   @@map("password_reset_tokens")
+}
+
+model AppSettings {
+  key       String   @id
+  value     String
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("app_settings")
 }
 
 model Session {
