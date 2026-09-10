@@ -7,6 +7,8 @@ import ForgotPage from "./pages/ForgotPage.jsx";
 import ResetPage from "./pages/ResetPage.jsx";
 import VerifyPage from "./pages/VerifyPage.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
+import UploadPage from "./pages/UploadPage.jsx";
+import JobViewPage from "./pages/JobViewPage.jsx";
 import DesignSystemPage from "./pages/DesignSystemPage.jsx";
 import PlansPage from "./pages/PlansPage.jsx";
 import ReturnPage from "./pages/ReturnPage.jsx";
@@ -97,6 +99,22 @@ export default function App() {
           element={
             <ProtectedRoute>
               <DashboardPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/upload"
+          element={
+            <ProtectedRoute>
+              <UploadPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/jobs/:id"
+          element={
+            <ProtectedRoute>
+              <JobViewPage />
             </ProtectedRoute>
           }
         />

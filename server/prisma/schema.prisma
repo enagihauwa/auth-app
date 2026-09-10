@@ -23,6 +23,7 @@ model User {
   subscription      Subscription?
   checkoutSessions  CheckoutSession[]
   paymentEvents     PaymentEvent[]
+  processingJobs    ProcessingJob[]
 
   @@map("users")
 }
@@ -129,4 +130,52 @@ model Session {
   @@index([expire], map: "IDX_session_expire")
   @@ignore
   @@map("session")
+}
+
+enum ProcessingJobStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum ProcessingJobKind {
+  EXTRACT
+  EDIT
+}
+
+model ProcessingJob {
+  id         Int                  @id @default(autoincrement())
+  userId     String               @map("user_id") @db.Uuid
+  kind       ProcessingJobKind
+  status     ProcessingJobStatus  @default(PENDING)
+  attempts   Int                  @default(0)
+  error      String?
+  input      Json?
+  result     Json?
+  parentId   Int?                 @map("parent_id")
+  createdAt  DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime             @default(now()) @map("updated_at") @db.Timestamptz(6)
+  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  parent     ProcessingJob?       @relation("ProcessingJobTree", fields: [parentId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  children   ProcessingJob[]      @relation("ProcessingJobTree")
+  files      ProcessingFile[]
+
+  @@index([userId], map: "processing_jobs_user_id_idx")
+  @@index([status, createdAt], map: "processing_jobs_status_created_at_idx")
+  @@map("processing_jobs")
+}
+
+model ProcessingFile {
+  id           Int            @id @default(autoincrement())
+  jobId        Int            @map("job_id")
+  storageKey   String         @map("storage_key")
+  originalName String         @map("original_name")
+  mimeType     String         @map("mime_type")
+  sizeBytes    Int            @map("size_bytes")
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  job          ProcessingJob  @relation(fields: [jobId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([jobId], map: "processing_files_job_id_idx")
+  @@map("processing_files")
 }

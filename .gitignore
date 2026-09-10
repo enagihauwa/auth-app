@@ -11,6 +11,9 @@ client/dist/
 # Prisma generated client
 server/src/generated/
 
+# Uploaded files (the local object-storage equivalent); only storage keys live in the DB
+server/src/storage/files/
+
 # Local-only tooling
 tools/
 

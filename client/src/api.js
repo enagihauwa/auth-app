@@ -1,9 +1,17 @@
 export async function api(path, options = {}) {
+  const isFormData =
+    typeof FormData !== "undefined" && options.body instanceof FormData;
+  const headers = isFormData ? {} : { "Content-Type": "application/json" };
+  const body = isFormData
+    ? options.body
+    : options.body
+      ? JSON.stringify(options.body)
+      : undefined;
   const res = await fetch(path, {
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options,
-    body: options.body ? JSON.stringify(options.body) : undefined,
+    body,
   });
   let data = null;
   try {

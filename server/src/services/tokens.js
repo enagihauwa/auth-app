@@ -15,24 +15,38 @@ export function randomResetToken() {
 
 export async function createVerificationCode(userId, { ttlMs, now = new Date() }) {
   const code = randomVerificationCode();
-  await prisma.emailVerificationCode.create({
-    data: {
-      userId,
-      codeHash: sha256Hex(code),
-      expiresAt: new Date(now.getTime() + ttlMs),
-    },
-  });
+  const expiresAt = new Date(now.getTime() + ttlMs);
+  await prisma.$transaction([
+    prisma.emailVerificationCode.updateMany({
+      where: { userId, consumedAt: null },
+      data: { consumedAt: now },
+    }),
+    prisma.emailVerificationCode.create({
+      data: {
+        userId,
+        codeHash: sha256Hex(code),
+        expiresAt,
+      },
+    }),
+  ]);
   return code;
 }
 
 export async function createResetToken(userId, { ttlMs, now = new Date() }) {
   const token = randomResetToken();
-  await prisma.passwordResetToken.create({
-    data: {
-      userId,
-      tokenHash: sha256Hex(token),
-      expiresAt: new Date(now.getTime() + ttlMs),
-    },
-  });
+  const expiresAt = new Date(now.getTime() + ttlMs);
+  await prisma.$transaction([
+    prisma.passwordResetToken.updateMany({
+      where: { userId, consumedAt: null },
+      data: { consumedAt: now },
+    }),
+    prisma.passwordResetToken.create({
+      data: {
+        userId,
+        tokenHash: sha256Hex(token),
+        expiresAt,
+      },
+    }),
+  ]);
   return token;
 }

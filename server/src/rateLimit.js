@@ -98,6 +98,33 @@ export const genericLimiter = rateLimit({
   message: { error: "Too many requests. Try again later." },
 });
 
+export const processingUploadLimiter = rateLimit({
+  windowMs: config.processing.rateLimits.upload.windowMs,
+  limit: config.processing.rateLimits.upload.limit,
+  skip: skipIfDisabled(),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many uploads from this address. Wait a while and try again." },
+});
+
+export const processingFollowUpLimiter = rateLimit({
+  windowMs: config.processing.rateLimits.followUp.windowMs,
+  limit: config.processing.rateLimits.followUp.limit,
+  skip: skipIfDisabled(),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many follow-up actions. Wait a while and try again." },
+});
+
+export const processingRetryLimiter = rateLimit({
+  windowMs: config.processing.rateLimits.retry.windowMs,
+  limit: config.processing.rateLimits.retry.limit,
+  skip: skipIfDisabled(),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many retries. Wait a while and try again." },
+});
+
 export const checkoutLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,

@@ -5,6 +5,7 @@ import pg from "pg";
 import { prisma } from "./db.js";
 import { config, isProduction } from "./config.js";
 import authRouter from "./routes/auth.js";
+import processingRouter from "./routes/processing.js";
 import billingRouter from "./routes/billing.js";
 import mockProviderRouter from "./routes/mockProvider.js";
 import { genericLimiter } from "./rateLimit.js";
@@ -57,6 +58,7 @@ app.get("/api/health", (req, res) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/processing", processingRouter);
 app.use(billingRouter);
 app.use("/pay", mockProviderRouter);
 

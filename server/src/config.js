@@ -48,6 +48,39 @@ export const config = {
     genericWindowMs: Number(process.env.GENERIC_WINDOW_MINUTES ?? 60) * 60 * 1000,
     genericMax: Number(process.env.GENERIC_MAX ?? 180),
   },
+  ai: {
+    // Paste your Google AI Studio key into .env under GEMINI_API_KEY by hand.
+    geminiApiKey: process.env.GEMINI_API_KEY ?? "",
+  },
+  processing: {
+    modelId: process.env.PROCESSING_MODEL_ID ?? "gemini-3.6-flash",
+    concurrency: Number(process.env.PROCESSING_CONCURRENCY ?? 2),
+    modelTimeoutMs: Number(process.env.PROCESSING_MODEL_TIMEOUT_MS ?? 45 * 1000),
+    maxAttempts: Number(process.env.PROCESSING_MAX_ATTEMPTS ?? 3),
+    retryBackoffMs: Number(process.env.PROCESSING_RETRY_BACKOFF_MS ?? 1500),
+    upload: {
+      maxFiles: Number(process.env.PROCESSING_MAX_FILES ?? 6),
+      maxFileBytes: Number(process.env.PROCESSING_MAX_FILE_BYTES ?? 5 * 1024 * 1024),
+      allowedMimeTypes: (
+        process.env.PROCESSING_ALLOWED_MIMES ??
+        "image/jpeg,image/png,image/webp,application/pdf"
+      ).split(","),
+    },
+    rateLimits: {
+      upload: {
+        windowMs: Number(process.env.PROCESSING_UPLOAD_LIMIT_WINDOW_MS ?? 15 * 60 * 1000),
+        limit: Number(process.env.PROCESSING_UPLOAD_LIMIT ?? 10),
+      },
+      followUp: {
+        windowMs: Number(process.env.PROCESSING_FOLLOWUP_LIMIT_WINDOW_MS ?? 60 * 60 * 1000),
+        limit: Number(process.env.PROCESSING_FOLLOWUP_LIMIT ?? 20),
+      },
+      retry: {
+        windowMs: Number(process.env.PROCESSING_RETRY_LIMIT_WINDOW_MS ?? 15 * 60 * 1000),
+        limit: Number(process.env.PROCESSING_RETRY_LIMIT ?? 5),
+      },
+    },
+  },
 };
 
 export const isProduction = config.nodeEnv === "production";
