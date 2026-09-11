@@ -66,6 +66,23 @@ export default function DashboardPage() {
           </div>
         </Card>
 
+        <Card>
+          <div className="ui-card__body" style={{ display: "grid", gap: "20px" }}>
+            <div className="stack--sm">
+              <h2 className="type-title-medium">Private notes</h2>
+              <p className="muted">
+                Your own notes space. Every record is scoped to your account, each write is
+                validated, and deleting one leaves an audit trail behind.
+              </p>
+            </div>
+            <div>
+              <Button type="button" variant="secondary" onClick={() => navigate("/notes")}>
+                Open notes
+              </Button>
+            </div>
+          </div>
+        </Card>
+
         <section className="stat-grid">
           <Stat label="Member since" value={memberDate} caption="Account created" />
           <Stat label="Session status" value="Active" caption="Session cookie valid for 7 days" />

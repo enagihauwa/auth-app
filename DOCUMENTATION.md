@@ -1,6 +1,6 @@
 # DOCUMENTATION
 
-Two slices, one repository, one document. Each slice is written in its own part with the **same eight-section formula** — *What This Is*, *How To Run It*, *The Flow, Step By Step*, *The Data Model*, *The Concepts*, *What Went Wrong*, *What This Slice Does Not Handle*, *If I Built This Again*. **Part I** is the authentication slice; **Part II** is the billing & subscriptions slice. The two parts share one codebase, one database, and one `npm run dev`; Part II reuses Part I's sessions and `lower(email)` account uniqueness without modification, and assumes Part I's setup.
+Four slices, one repository, one document. Each slice is written in its own part with the **same eight-section formula** — *What This Is*, *How To Run It*, *The Flow, Step By Step*, *The Data Model*, *The Concepts*, *What Went Wrong*, *What This Slice Does Not Handle*, *If I Built This Again*. **Part I** is the authentication slice; **Part II** is the billing & subscriptions slice; **Part III** is the AI receipt-extraction slice; **Part IV** is the private-notes slice. All parts share one codebase, one database, and one `npm run dev`; each later part reuses Part I's sessions and `lower(email)` account uniqueness without modification, and assumes Part I's setup.
 
 ## Part I — Authentication
 
@@ -577,7 +577,7 @@ The second change: wrap webhook fulfilment in one database transaction. Today `f
 
 ---
 
-# Part III — AI-Powered Receipt Extraction
+## Part III — AI-Powered Receipt Extraction
 
 ## Section 1: What This Is
 
@@ -780,3 +780,147 @@ CREATE TABLE processing_files (
 ## Section 8: If I Built This Again
 
 I would start with the worker **out of process and backed by a real queue** — a Postgres-polling lightweight worker or Redis-backed BullMQ — and only then the API. The in-process FIFO was the correct size for this slice, but the first production step is detaching model calls from the API's lifetime and making concurrency *"how many workers exist"* instead of *"a config number inside one process"*, which is also where the per-spend instrumentation belongs. Second, I would **schema-version the JSONB results** (a `schema_version` column from day one): the Zod schemas will evolve, and old `result` rows currently promise a shape they may not keep. Third, I would keep the two things that held up especially well — the provider **interface** that let me test the whole service against a fake model, and **structured output plus our own strict validation** as an explicit two-gate design; those two decisions are the difference between this slice being testable and being a demo. Last, files: into a real bucket with signed URLs and a retention rule from the start, because the storage seam is exactly where production surprises hide.
+
+---
+
+## Part IV — Private Notes
+
+### Section 1: What This Is
+
+This is the **private-notes slice** of the same app. A signed-in user writes plain-text notes; the server stores them in Postgres and hands the client a **public identifier** (a UUID column stamped at creation) that is used in every URL — the numeric database id is never exposed outside the server. The three read routes and the delete route are all **scoped to the caller inside the SQL itself** (`WHERE user_id = $1 AND public_id = $2`), so no route ever fetches another user's row and then decides in application code whether to refuse it. Deleting a note is an **atomic `$transaction`** that also writes a row to a `note_delete_audit` table (who deleted what, when), so a deletion is always traceable and can never be half-written. The client is a React slice of the existing app (`/notes`, `/notes/new`, `/notes/:publicId`) that reuses Part I's sessions and everything else unmodified.
+
+Deliberately **not** included: no public sharing (the "public identifier" is a *private* address — it is never listable by strangers), no search, no tags, no editing/renaming of an existing note (the API surface is create/list/detail/delete only), no soft-delete or trash/restore, no per-note attachments, and no collaboration or sharing between accounts. The audit table records *who performed the deletion* for accountability; there is deliberately **no** endpoint that lets a client read the audit log, so it is server-side state that the app itself never exposes.
+
+### Section 2: How To Run It
+
+Nothing about running changes: the notes slice lives in the same repo, the same Express server, the same React client, and the same Postgres database as Parts I–III, and starts with the same commands — `npm install`, `npm run setup`, `npm run db:migrate`, `npm run dev`. The migration `server/prisma/migrations/20240105000000_notes` is applied by `npm run db:migrate` like the others. It creates only the two new tables (`notes`, `note_delete_audit`) plus their indexes — purely additive, so it merges cleanly with any earlier migration history in this repository.
+
+To exercise the slice end to end: sign in (Part I, Section 3), open <http://localhost:5173/notes>, press **New note**, write a title and body, and you are taken to `/notes/<publicId>` — the address you are given is a random UUID, never an integer. Press **Delete note** and confirm; the note disappears from your list and a row lands in `note_delete_audit`. If you open someone else's note URL you get a `403` (not a served page); a URL that never existed gets `404`. Screenshots of the list, the detail page (showing the public link and the confirm dialog), and the rendered audit log live in `evidence/shots/` (`notes-01-list-public-ids.png`, `notes-02-detail-public-url.png`, `notes-03-audit-log.png`). The tests live in `server/test-notes.mjs`.
+
+**New environment variables:** none. The slice adds no configuration surface.
+
+**The tests** (`npm --prefix server test`, or `node --test --test-force-exit test-notes.mjs`) exercise every route over the real API and a real Postgres: unauthenticated access returns 401 on all four routes; creation validates with the shared Zod schema and returns a body that contains `public_id` but **never** `id` or `userId`; an empty account lists `[]`; the list returns only the signed-in user's notes, without `content` or any raw id; detail serves its owner, returns 403 to another authenticated user with **no note payload**, and 404 for a missing id (400 for a malformed UUID); and delete is atomic — a forbidden cross-user delete leaves the note intact, the owner's delete removes the row *and* writes the audit row in the same transaction, and replaying the delete afterwards returns 404.
+
+### Section 3: The Flow, Step By Step
+
+**1. Create.** `client/src/pages/NoteCreatePage.jsx` validates against the shared `createNoteSchema` (`shared/notes.js`) on the client, then `POST /api/notes` (`server/src/routes/notes.js:41`). The route runs the same schema through `validateBody` (`server/src/routes/notes.js:4,41`), then calls `createNote(prisma, userId, body)` (`server/src/services/notes.js:11`), which inserts the row and stamps `publicId: randomUUID()`. The response body is the note shaped by the route's serializer — `public_id`, `title`, `content`, timestamps — and crucially **not** `id` (see `serializeNote`). The client then `navigate`s to `/notes/<public_id>` (`NoteCreatePage.jsx:45`), so the user's browser only ever holds a UUID.
+
+**2. List.** `GET /api/notes` (`server/src/routes/notes.js:32`) calls `listNotes` (`server/src/services/notes.js:3`), which is one `findMany` with `where: { userId }`, `orderBy: { createdAt: "desc" }`, and a `select` of only the four public fields — no `content`, no `id`, no `userId`. The list page renders cards, each linking to `/notes/<public_id>` (`NotesPage.jsx:99`).
+
+**3. Detail.** `GET /api/notes/:publicId` (`server/src/routes/notes.js:50`) validates the parameter against `notePublicIdSchema` (a naive UUID pattern, shared with the client), then calls `getNote` (`server/src/services/notes.js:22`). The **entire** lookup is `db.note.findFirst({ where: { userId, publicId } })` — the caller's ownership is part of the SQL predicate, so a non-owner's row is never fetched. If the scoped query misses, a tiny existence probe (`classifyMissing`, `server/src/services/notes.js:30-36`) — `findUnique` on `publicId` with `select: { id: true }` only — distinguishes "the note exists but belongs to someone else" (403) from "no such note" (404). `NoteDetailPage.jsx` special-cases 403/404 to its "never shown a note that is not yours" empty state (`NoteDetailPage.jsx:41,67-85`).
+
+**4. Delete.** `DELETE /api/notes/:publicId` (`server/src/routes/notes.js:69`) calls `deleteNote` (`server/src/services/notes.js:38`), which is one interactive `$transaction`: a scoped `findFirst` (owner's own note, id/publicId/title only) → if found, `noteDeleteAudit.create` (note_id, note_public_id, title, deleted_by) then `note.delete` → the whole thing commits together, or rolls back as if nothing happened. A miss classifies 403 vs 404 inside the same transaction. On 200 the client `navigate`s back to `/notes` (`NoteDetailPage.jsx:60`). Atomicity here is the point: no crash window can leave an audit row for a note that still exists, or a deleted note with no audit trail.
+
+### Section 4: The Data Model
+
+### `notes` — one row per private note
+
+| column | type | notes |
+|---|---|---|
+| `id` | `bigint` | Surrogate key; auto-increment. **Never leaves the server.** |
+| `public_id` | `uuid` | `@unique`. The only identifier the client ever sees; used in `/notes/:publicId` URLs. |
+| `title` | `text` | Required, non-empty via Zod. |
+| `content` | `text` | Required, non-empty via Zod. |
+| `user_id` | `uuid` | FK → `users.id`, `ON DELETE CASCADE`. |
+| `created_at` / `updated_at` | `timestamptz` | Defaulted to `now()`. |
+
+Index: `notes_user_created_idx` on `(user_id, created_at)` carries the list query (`WHERE user_id = $1 ORDER BY created_at DESC`); `public_id`'s unique index carries the detail/delete lookups. The composite ownership predicate `(user_id, public_id)` is the security boundary — it lives in the index/plan as much as in the code.
+
+**Constraints that make invalid states impossible here:** FKs are enforced (`user_id` must exist, and deleting the account cascades the notes away); `public_id` is globally unique, so "which row do I mean" is never ambiguous; `@unique` on `public_id` means an account cannot be tricked into colliding identifiers.
+
+### `note_delete_audit` — an append-only ledger of deletions
+
+| column | type | notes |
+|---|---|---|
+| `id` | `bigint` | Serial. |
+| `note_id` | `bigint` | FK-ish reference to the deleted note's `id` (the note row is gone; this is the record). |
+| `note_public_id` | `uuid` | The public identifier the client used in the URL that triggered the delete. |
+| `title` | `text` | The note's title at time of deletion (immutable snapshot, not a join). |
+| `deleted_by` | `uuid` | `users.id` of the account that performed the delete. |
+| `deleted_at` | `timestamptz` | Default `now()`. |
+
+Index: `note_delete_audit_user_deleted_idx` on `(deleted_by, deleted_at)` makes "what has this account deleted recently" cheap — the shape a future admin/audit UI would query first. Only the server writes to it, inside the same transaction that deletes the note; there is no route to read it.
+
+The migration (`server/prisma/migrations/20240105000000_notes/migration.sql`) is additive: two `CREATE TABLE`s plus two indexes. `@@map("notes")` / `@@map("note_delete_audit")` map these to snake_case table names consistent with the rest of the schema.
+
+### Section 5: The Concepts
+
+### Public identifiers: the client never sees a database id
+
+- **What it is.** Every note gets two identities: a numeric surrogate `id` (the storage cockroach) and a random `public_id` UUID (the address the world uses). URLs, API bodies, and shared links only ever carry the UUID.
+- **Why it is needed.** Numeric sequence ids are predictable and enumerable (`/notes/3`, `/notes/4`, ...), which turns "guess someone else's URL" into a blind-checking exercise and leaks population size. Even with ownership scoping, giving clients a globally sequential id invites cross-account enumeration probes. The UUID makes a note's address unguessable; combined with ownership scoping, "someone else's note URL" can only ever answer 403.
+- **How I implemented it.** `createNote` stamps `publicId: randomUUID()` (`server/src/services/notes.js:14`); the serializer in `server/src/routes/notes.js` maps `public_id` and drops `id`/`userId`; every route validates the param against `notePublicIdSchema` before use; the server's `getNote`/`deleteNote` look up by `{ userId, publicId }` together.
+- **What I chose against, and why.** Using the numeric `id` in URLs (defeats the whole point); a UUID *instead* of an auto-increment `id` internally (an autoincrement is far cheaper for FKs/joins and the UUID only needs to be unique, which a dedicated column already is); and deriving the public id from the row (`hash(id)`) — a derived value composes badly and spreads the "which column is the address" question across every query. The DB migration enforces it structurally (`public_id` `@unique`), not just by habit.
+
+### Ownership lives inside the SQL predicate, never in app code
+
+- **What it is.** Every note query carries the caller's `userId` inside the `WHERE` clause. No route fetches by `publicId` first and then decides in JavaScript whether the caller may see it.
+- **Why it is needed.** Fetch-then-check has two failure modes. First, *data exposure:* the fetch itself returns another user's row (full `content`, the note's internal id) into server memory — a slip in the check (or an early `return` that skips it) ships that payload. Second, *side channels:* deciding 403 vs 404 after having the row in hand invites leaks about which notes exist. Scoping in SQL makes "you cannot see it" a property of the query the database executes, not of a second step someone might forget.
+- **How I implemented it.** `listNotes` sends `where: { userId }`; `getNote` sends `where: { userId, publicId }`; `deleteNote`'s transaction does the same. `classifyMissing` then exists only to answer the one question the scoped query leaves open — "did *anyone* see such a note address?" — and it reads back only `{ id }` (a bare existence flag), never content, and the result never leaves the server.
+- **What I chose against, and why.** The naive fetch-then-check (`findUnique({ where: { publicId } })` then `note.userId !== userId ? 403`) — rejected above, and kept only as a measurement baseline in `server/probe-notes-query-count.mjs`. Also rejected: encrypting content so "the other user's row" would be unreadable — that protects against *my* database being stolen, but does nothing against a buggy route that returns the row to the wrong caller; scoping is the primary defence, encryption would be a second layer for a different threat.
+
+### The delete is one atomic transaction with an audit row
+
+- **What it is.** `deleteNote` wraps look-up + audit-write + delete in a single `$transaction` (`server/src/services/notes.js:38-61`). Either all three happen or none do.
+- **Why it is needed.** Delete is a *state transition with a history requirement*. The audit row and the deleted row are one fact: "this note, titled X, was removed by account Y at T." Written separately, a crash between the two leaves either a dangling audit entry for a note that never disappeared, or a deleted note with no record of who did it — both are audit failures. In a single transaction neither can happen.
+- **How I implemented it.** Inside `deleteNote`, the scoped `findFirst` runs first; a miss classifies 403/404 and the transaction commits nothing; a hit inserts the audit row then deletes the note, and the transaction commits both together. The audit snapshot stores `title` (and the public id) rather than joining back, so the ledger is immune to later renames — meaning the historical fact is frozen at deletion time.
+- **What I chose against, and why.** A separate audit table vs. a `deleted_at` flag on the note itself (soft delete): soft delete keeps the content (which collides with the "never fetch others' rows" goal — recycling rows would soon carry dead content around, and the app has no restore feature, so it is pure debt). A `deleted_at`-only column without the separate ledger: loses the "what did I delete, when, as whom, with what title" record that a plain timestamp cannot recover once the row is gone.
+
+### 403 vs 404: are you refused, or does it not exist?
+
+- **What it is.** An authenticated caller who names a UUID that exists but belongs to another account gets **403 Forbidden** (it exists, you may not have it); a UUID that matches nothing gets **404** (it never existed or was deleted). A *malformed* UUID gets **400** before any query runs.
+- **Why it is needed.** 404-only would *hide* the note from other users (safer-looking, and the classic "don't confirm existence" tactic) — but this product's requirement is that unauthorised access be *loud enough to audit*, which is exactly why the audit trail exists. 403-only for everything would lie about deletes and poison the "note gone" UX. The two-status answer keeps the semantics honest: deletion leaves a 404, existence-but-not-mine leaves a 403.
+- **The side-channel trade-off.** Distinguishing 403 from 404 lets a caller probe *which valid UUIDs exist*. The public id is unguessable (a 122-bit random UUID), so the only UUID a caller can name is one they were handed — meaning the 403-vs-404 distinction leaks nothing about *other* users' notes they could not otherwise learn. That is the pragmatic imbalance I accepted and would defend.
+
+### Section 6: What Went Wrong
+
+- **Symptom.** Early on the detail route 500'd on notes that the caller didn't own.
+- **Investigation.** The first draft of `getNote` resolved the note by public id, checked ownership, and — on a mismatch — tried to run an existence probe to pick 403 vs 404. The probe path was wired up without an `await`, so the code compared `undefined.status` — `Cannot read properties of undefined` — and the error escaped the handler as a 500.
+- **Cause.** Two bugs hiding behind each other: (a) the ownership check/drop ordering made the "not yours" path the *error* path instead of a first-class status, and (b) the probe call was missing `await`, so `{ status: undefined }` flowed into the response. The 500 also leaked the shape of the error in a way that contradicted the "never exposed" story.
+- **Fix.** `getNote` now does the scoped `findFirst` first (ownership inside the SQL — the non-owner case naturally finds nothing and flows through `classifyMissing`, which is awaited) (`server/src/services/notes.js:22-28`). The fix both removed the ordering hazard and the un-awaited probe; the new regression tests assert the exact statuses (200 own / 403 other / 404 missing / 400 malformed) rather than just "not 500".
+- **Second symptom.** While measuring the query counts I almost shipped a *naive-by-count* story — "fetch the row, then check in app code" was the trivial one-statement approach, and it looks just as cheap as the scoped version on paper.
+- **Cause/decision.** Statement-count alone is a poor proxy for rightness here. The naive approach is one statement *and* hands another user's row to the server — the count is identical to the safe version, so "fewer statements" was never the argument. What changed is *what crosses the wire*, not how often the wire is used. The honest before/after table (Section 8's evidence, and `server/probe-notes-query-count.mjs`) says exactly that: the happy path stays 1 vs 1, and the only +1 is the deliberate existence probe that turns "exists but not yours" into a 403 instead of a guessed 404.
+
+### Section 7: What This Slice Does Not Handle
+
+- **No editing or renaming.** The API surface is create/list/detail/delete. There is no `PATCH /api/notes/:id`, so titles and bodies are fixed at creation. Editing needs its own optimistic-locking and audit story (it was deliberately left out to keep the surface small; Part I Section 8's "same schema, both sides" pattern would extend cleanly if it were added).
+- **No sharing or collaboration.** A note is strictly single-owner: no "share this note" by public id, no read-only guest access, no comment threads. The `public_id` is a *private* address. Sharing would invert several invariants here (403 vs 404 semantics, the "never fetch others' rows" rule) and is a separate feature.
+- **No soft-delete, trash, or restore.** Once deleted, a note is gone; the audit table holds the metadata, not the content. The UI says so clearly ("permanently removed from your account").
+- **No search, tags, folders, or pagination.** The list returns everything, newest first. A large account would want page cursors and a search index.
+- **The audit log is write-only from the app's perspective.** There is deliberately no endpoint to read `note_delete_audit`. Accountability exists in the database for operators/investigators; it is not a user-facing feature.
+- **Rate limiting is the shared global one.** The notes routes rely on Part I's `genericLimiter`; they add no per-action budgets of their own (unlike the cost-bearing AI routes). Notes are cheap rows; a very chatty client is bounded by the global cap.
+
+### Section 8: If I Built This Again
+
+The architecture of the slice — public UUIDs, ownership inside the SQL predicate, atomic delete-with-audit, and the shared Zod schemas — holds. I would keep all four. What I would do differently:
+
+- **I would buy the ownership predicate earlier.** The `(user_id, public_id)` composite index is the real hot path (detail + delete both run it), and I would have put it in the migration from the very first draft instead of deciding on it after looking at the plan. Same for the `(user_id, created_at)` list index — it is the difference between the list being a seek and a sort-and-scan, and the earlier it exists the less the growth story is an afterthought.
+- **I would decide the 403/404 semantics in writing before writing a line of route code.** The distinction is genuinely load-bearing (it sets what the audit trail can mean, what the UI empty-state should say, and what a de-duplicated "which of my URLs still work?" client would do), and I arrived at it by discovering the 500 bug rather than by design.
+- **Editing would arrive with an audit story, or not at all.** An `PATCH` with no "who changed what" trail would quietly puncture the ledger's meaning; if I rebuilt this, "notes" and "audit" would be designed so that *every* mutation — create, update, delete — shares one write path with one ledger, instead of only delete having one today.
+- **The naive baseline would be measured by a committed probe earlier.** The probe (`server/probe-notes-query-count.mjs`) doubles as both an optimisation check and a documentation artifact; in a rebuild I would write it as the first test, before the correct implementation exists, so the "before" number is a real measurement of the actual first draft rather than a reconstruction. The measured story is below — the counts are real, taken against the live server and Postgres.
+
+**Query-count evidence** (`server/probe-notes-query-count.mjs`, run output in `server/measurements-notes.txt`): each API action was executed twice against a counting `$extends` client — once with the rejected naive implementation (fetch, then ownership-check in app code) and once with the shipped scoped implementation.
+
+| action | before (naive) | after (shipped) | why after ≥ before |
+|---|---|---|---|
+| list | 1 `Note.findMany` (all users, filtered in JS) | 1 `Note.findMany` (`WHERE user_id`) | safety: only the caller's rows ever cross the wire |
+| create | 1 `Note.create` | 1 `Note.create` | identical |
+| detail (own) | 1 `Note.findUnique` | 1 `Note.findFirst` | identical count, scoped predicate |
+| detail (other user) | 1 `Note.findUnique` | 2 (scoped `findFirst` + existence probe) | +1 is the deliberate 403-vs-404 classifier |
+| detail (missing) | 1 `Note.findUnique` | 2 (scoped `findFirst` + existence probe) | +1 classifies 404 |
+| delete (own) | 3 separate auto-commits (`findUnique` + audit + delete) | 3 inside one `$transaction` (scoped `findFirst` + audit + delete) | same count, now atomic — no partial state possible |
+| delete (other user) | 1 `Note.findUnique` | 2 (scoped miss + probe → 403) | +1 turns "exists, not yours" into 403 |
+| delete (missing) | 1 `Note.findUnique` | 2 (scoped miss + probe → 404) | +1 classifies 404 |
+
+The takeaway from the measurements is exactly the "What Went Wrong" section's point: the shipped implementation is **not** cheaper by statement count in the happy path (1 vs 1 in list/create/detail-own) — it is *safer by what it returns* (only rows the caller owns), and the only rows where after > before are the deliberate +1 additions that make 403 vs 404 honest instead of guessed. "Fewer database statements" was never the goal; "no statement may answer a question it was not asked" and "a delete either fully happens or doesn't" are the goals, and the numbers show they cost nothing on the happy path.
+
+**Access-control audit** (all covered by `server/test-notes.mjs` over the real HTTP API):
+
+| route | signed-out | signed-in, own | signed-in, other | malformed id | missing id | notes |
+|---|---|---|---|---|---|---|
+| `GET /api/notes` | 401 | 200 (own only, no `content`, no raw ids) | n/a (no id in path) | n/a | n/a | here is a list |
+| `POST /api/notes` | 401 | 201 (body has `public_id`, never `id`/`userId`) | n/a | 400 (invalid body) | n/a | shared Zod on both ends |
+| `GET /api/notes/:publicId` | 401 | 200 | 403 (no note payload) | 400 | 404 | scoped `findFirst` + probe |
+| `DELETE /api/notes/:publicId` | 401 | 200 (row + audit row, atomic) | 403 (note untouched) | 400 | 404 | `$transaction` |
+
+Evidence screenshots: `evidence/shots/notes-01-list-public-ids.png` (list rendered with public UUID addresses), `evidence/shots/notes-02-detail-public-url.png` (detail page — the `Private link` card shows `/notes/<publicId>`, the only identifier the browser ever has), `evidence/shots/notes-03-audit-log.png` (rendered `note_delete_audit` rows: note_id, public_id, title, deleted_by, deleted_at — real rows produced by the running tests and the delete flow above). The raw HTML behind the audit screenshot is `evidence/notes-audit-log.html`.

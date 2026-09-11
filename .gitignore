@@ -17,6 +17,9 @@ server/src/storage/files/
 # Local-only tooling
 tools/
 
+# Headless Chrome profiles created by the evidence screenshot scripts
+.chrome-shot-profile*/
+
 # OS noise
 Thumbs.db
 .DS_Store
