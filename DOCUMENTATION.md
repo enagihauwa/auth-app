@@ -1,6 +1,6 @@
 # DOCUMENTATION
 
-Four slices, one repository, one document. Each slice is written in its own part with the **same eight-section formula** — *What This Is*, *How To Run It*, *The Flow, Step By Step*, *The Data Model*, *The Concepts*, *What Went Wrong*, *What This Slice Does Not Handle*, *If I Built This Again*. **Part I** is the authentication slice; **Part II** is the billing & subscriptions slice; **Part III** is the AI receipt-extraction slice; **Part IV** is the private-notes slice. All parts share one codebase, one database, and one `npm run dev`; each later part reuses Part I's sessions and `lower(email)` account uniqueness without modification, and assumes Part I's setup.
+Five slices, one repository, one document. Each slice is written in its own part with the **same eight-section formula** — *What This Is*, *How To Run It*, *The Flow, Step By Step*, *The Data Model*, *The Concepts*, *What Went Wrong*, *What This Slice Does Not Handle*, *If I Built This Again*. **Part I** is the authentication slice; **Part II** is the billing & subscriptions slice; **Part III** is the AI receipt-extraction slice; **Part IV** is the private-notes slice; **Part V** is the records-&-access slice — a write-only audit log of every application action, plus a single middleware that records every denied (401/403) request so unauthorised access leaves a trail too. All parts share one codebase, one database, and one `npm run dev`; each later part reuses Part I's sessions and `lower(email)` account uniqueness without modification, and assumes Part I's setup.
 
 ## Part I — Authentication
 
@@ -924,3 +924,172 @@ The takeaway from the measurements is exactly the "What Went Wrong" section's po
 | `DELETE /api/notes/:publicId` | 401 | 200 (row + audit row, atomic) | 403 (note untouched) | 400 | 404 | `$transaction` |
 
 Evidence screenshots: `evidence/shots/notes-01-list-public-ids.png` (list rendered with public UUID addresses), `evidence/shots/notes-02-detail-public-url.png` (detail page — the `Private link` card shows `/notes/<publicId>`, the only identifier the browser ever has), `evidence/shots/notes-03-audit-log.png` (rendered `note_delete_audit` rows: note_id, public_id, title, deleted_by, deleted_at — real rows produced by the running tests and the delete flow above). The raw HTML behind the audit screenshot is `evidence/notes-audit-log.html`.
+
+---
+
+## Part V — Records & Access
+
+### Section 1: What This Is
+
+This is the **records-&-access slice** of the same app: a write-only **audit log** that records every meaningful action across the other four slices — sign-up, verification, sign-in, sign-out, forgot/reset, note create/delete, checkout opened, upgrade/downgrade/cancellation scheduled, webhook fulfilled, payment failed, duplicate webhook ignored, and every processing-job event — and a **single middleware** (`server/src/middleware/auditAccess.js`) that additionally records every *denied* request, so **unauthorised access is an audited event, not a silent dead-end**. Every row names the actor (the signed-in account, or *anonymous* when nobody is signed in), the action, an optional target, free-text detail, and a JSONB metadata blob (IP, method, path, user-agent, attempted email, price amounts, job ids, …). The record is deliberately **best-effort**: writing an audit row can never fail, delay, or roll back the operation it belongs to, so auditing never becomes a reason the business operation breaks.
+
+Two design choices carry the slice. First, the audit rows for actions that already mutate under a transaction are written **inside that transaction** (the note delete writes *both* the `note_delete_audit` snapshot and the `audit_log` row in the same `$transaction`), so "the event happened" and "the event was recorded" are one atomic fact. Second, refusals are recorded by a middleware that wraps `res.send`, not by sprinkling `recordAudit` calls through every route — no route can forget to log a 401 or a 403. The slice adds **no configuration surface** and **no read endpoint**: the audit log is server-side state for operators (Part IV made the same call for `note_delete_audit`), queryable with SQL, never exposed to clients.
+
+Deliberately **not** included: no public/API read of the log, no retention/purge job, no tamper-evident hashing chain on rows, no auditing of *successful* plain reads (nothing is wrong with a legitimate detail-page read; the log records mutations and refusals), no audit of background-worker transitions (the billing reaper already writes its own `payment_events` rows, and stuck-job recovery is logged to the console), and no correlation ids across endpoints. The gaps are named in Section 7.
+
+### Section 2: How To Run It
+
+Nothing about running changes: the slice lives in the same repo, server, client, and Postgres database as Parts I–IV, and starts with the same commands — `npm install`, `npm run setup`, `npm run db:migrate`, `npm run dev`. The migration `server/prisma/migrations/20240106000000_audit_log` is applied by `npm run db:migrate` like the others. It creates **one** new table (`audit_log`) plus two indexes and one FK — purely additive, so it merges cleanly with any earlier migration history.
+
+**New environment variables:** none.
+
+To see the log working: sign in, create and delete a note, open a checkout and cancel it, then look at the table:
+
+```sql
+SELECT action, actor_id, target_type, target_id, detail
+FROM audit_log ORDER BY created_at DESC LIMIT 20;
+```
+
+A row exists for every sign-in/sign-out, every note create/delete, every checkout/cancel, every upload job — and, in a fresh browser (or signed out), an attempt at the protected pages lands an `auth.unauthorized_access` row instead of vanishing:
+
+```sql
+SELECT action, actor_id, metadata->>'path' AS path, metadata->>'status' AS status,
+       metadata->>'email' AS attempted_email
+FROM audit_log
+WHERE action = 'auth.unauthorized_access'
+ORDER BY created_at DESC;
+```
+
+The harness `server/audit-access-control.mjs` (run from `server/`, against a running API) drives the whole access matrix: it creates two users, signs both in, then — as user 2 — tries to read/mutate user 1's notes and processing jobs, probes user 1's checkout sessions and checkout-injection, hits the webhook signature guard, replays routes with **no** cookie at all, and replays a stale cookie after sign-out — printing every attempt and status. Every one of those blocked requests is a row in `audit_log`.
+
+**The tests** (`npm --prefix server test`) run the existing suites; the auth, notes, billing-reaper, and AI suites now background-write audit rows as part of their real flows, and `server/audit-access-control.mjs` is the access-specific evidence runner (it prints its own summary table rather than living in `node --test`, because it needs two live sessions to stage cross-account *and* anonymous attempts).
+
+### Section 3: The Flow, Step By Step
+
+**1. The middleware is registered once, before the routes.** `server/src/app.js:20` mounts `auditUnauthorizedAccess()` immediately after `morgan`. It replaces `res.send` on every request with a wrapper that, when a response actually leaves, sees `statusCode` — if that is `401` or `403` (and this response has not been recorded already, guarded by `req.__auditAccessRecorded`), it writes one `auth.unauthorized_access` row (`server/src/middleware/auditAccess.js:14-44`) and then sends the response unchanged. Because the wrapper runs *at send time*, registering it before `express.json` (`app.js:21`) is safe: by the time any response is sent the body has already been parsed, so a failed sign-in's attempted email is available.
+
+**2. What a blocked request records.** For a `401` the actor is `null` (anonymous) — the session either never existed or was invalid; if the request body carried an `email`, that address is captured in `metadata.email` (trimmed and lowercased) so "who was trying to sign in" is recoverable even though the attempt failed. For a `403` the actor is the *signed-in* user (`req.session.userId`) — the middleware distinguishes "the system did not recognise you" from "I know you, and you were refused". The metadata always carries `ip`, `method`, `path` (= `req.originalUrl`), `status`, and `user-agent`. The response body is **never** stored. The `req.__auditAccessRecorded` flag guarantees each response produces at most one row even if a handler calls `res.send` more than once.
+
+**3. The action routes write their own rows at the moment of the fact.** The auth routes are `server/src/routes/auth.js`: sign-up after the account exists (`:93`, `user.signup`), verification when the code is redeemed (`:152`, `user.verify_email`), sign-in when the password matches (`:245`, `user.signin`), forgot-password when a reset link is sent (`:292`, `user.forgot_password`), reset when the new password lands (`:343`, `user.reset_password`), and sign-out right after the session is destroyed (`:369`, `user.signout` — fired `void`, because the session is already gone and the row must not delay the response). Note the enumeration rule from Part I is preserved exactly: `forgot` records the row *only* when the account actually exists, so the audit log never leaks account existence through row counts.
+
+**4. Notes: the record is part of the transaction.** The notes service (`server/src/services/notes.js`) writes `note.create` after the insert (`:21`) and `note.delete` **inside** the same `$transaction` that writes the `note_delete_audit` snapshot and deletes the row (`:67`) — so the `audit_log` row, the Part IV ledger row, and the deletion commit or roll back together. A crash cannot leave a note deleted with no trail, or a trail for a note that still exists.
+
+**5. Billing: webhook-driven events are attributed to the real account.** The billing routes (`server/src/routes/billing.js`) record checkout opened (`:108`), downgrade scheduled (`:189`), cancellation scheduled (`:240`), duplicate webhook ignored either by event-id (`:290`) or because the checkout was already completed (`:320`), payment failed (`:368`), the scheduled upgrade (`:413`), and both flavours of fulfilled — the deferred yearly upgrade (`:442`) and a fresh grant (`:496`). Because webhook requests carry **no** browser session, the actor is the owning `userId` resolved from the checkout session — the record says *whose* account the webhook changed, without pretending the provider visited the site.
+
+**6. Processing: the cost-bearing events are recorded.** The upload route records `processing.job_created` (`server/src/routes/processing.js:130`) once the job and files exist, the follow-up route records `processing.job_follow_up` (`:194`) when the child `EDIT` job is enqueued, and the retry route records `processing.job_retried` (`:223`) when a `FAILED` job is requeued — each with the job id as `target_id` and the upload names/sizes in metadata.
+
+**7. The actor can disappear — the row still lands.** `recordAudit` (`server/src/services/audit.js:25`) writes `actor_id` against an `ON DELETE SET NULL` foreign key: deleting a user nulls their past rows rather than cascading them away, so history survives the account. If a write still trips the `P2003` foreign-key error (a stale session whose user was already deleted), `recordAudit` catches it and retries once as an **anonymous** row (`audit.js:39-46`). And every failure path is a `console.error`, never a throw: the last thing a failed audit write may do is log its own failure.
+
+### Section 4: The Data Model
+
+### `audit_log` — every action, appended
+
+```sql
+CREATE TABLE "audit_log" (
+    "id"          BIGSERIAL PRIMARY KEY,
+    "actor_id"    UUID,
+    "action"      TEXT NOT NULL,
+    "target_type" TEXT,
+    "target_id"   TEXT,
+    "detail"      TEXT,
+    "metadata"    JSONB,
+    "created_at"  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "audit_log_actor_created_idx"  ON "audit_log" ("actor_id", "created_at");
+CREATE INDEX "audit_log_action_created_idx" ON "audit_log" ("action", "created_at");
+ALTER TABLE "audit_log"
+    ADD CONSTRAINT "audit_log_actor_id_fkey"
+    FOREIGN KEY ("actor_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE NO ACTION;
+```
+
+- `action` is a namespaced constant (`user.*`, `note.*`, `billing.*`, `processing.*`, `auth.unauthorized_access`) from `AUDIT_ACTIONS` (`server/src/services/audit.js:1-21`). No free text goes into the action column; free text belongs in `detail`.
+- `target_type`/`target_id` are the coarse "what did the action happen to": `user` + a UUID, `checkout_session` + a `cs_…` reference, `subscription` + the numeric id as text, `processing_job` + a bigint id as text, `http_request` + `"METHOD path"` for refusals. Keeping `target_id` as `TEXT` lets one column carry every kind of identifier without casts.
+- `metadata` is a JSONB blob of whatever the action needs — email addresses, plan and amounts (integer minor units, matching Part II's *money as integer minor units* rule), reference strings, applied-at dates, upload file lists, statuses, IPs. It is captured for the record, never used for lookups (the two indexes are on actor and action; the JSON blob has no index, which keeps writes cheap).
+- `actor_id` is `UUID`, nullable, `ON DELETE SET NULL`: it *is* a foreign key (post-deletion history is preserved), and `null` is the deliberate state for "nobody was signed in" — identical to a deletion-nulled actor, which is fine because both mean "this is not attributed to a live account anymore".
+
+**Constraints that make invalid states impossible here:** the FK guarantees an `actor_id` either names a real user or is `NULL` — a stray actor id cannot be written; `action NOT NULL` means a record always says *what*; the two indexes make the two reads an operator actually does (per-actor history, per-action review) seek trivial.
+
+**The two older ledgers it sits alongside.** Part II's `payment_events` is a *domain* ledger — it carries `amount_minor`, `currency`, `provider_reference`, and the unique `event_key` that makes it the idempotency mechanism, so it is both an audit trail *and* the durability anchor of billing. Part IV's `note_delete_audit` is a *snapshot* — it freezes the note's title and public id because the note row itself is about to be gone. `audit_log` is the *narrowest and widest*: it is not idempotent (each happened-once action writes exactly one row), it holds no money rules, and it alone covers every slice and includes refusals.
+
+### Section 5: The Concepts
+
+### The record lives inside the transaction
+
+- **What it is.** When an action is a mutation, the `audit_log` row is written in the same `$transaction` as the mutation itself — the note-delete path is the example: `note_delete_audit` create + `audit_log` create + `note.delete` commit or roll back together (`server/src/services/notes.js:50-77`).
+- **Why it is needed.** "Deleted at 12:03:04 by user Y" is a fact about the deletion. If the record were written *after* the commit and the process crashed in between, the deletion would have no trail; if it were written *before* and the commit failed, the trail would reference something that never happened. Writing both under one transaction makes "the event happened" and "the event was recorded" two views of the same commit.
+- **How I implemented it.** Billing and auth records still use a bare `recordAudit(prisma, …)` *after* their writes — those routes are single-statement or already transactional enough (the billing *ledger* rows carry idempotency on their own), whereas the note delete is explicitly `$transaction`-wrapped and the audit row goes through the transaction object (`tx`) exactly like the Part IV ledger row.
+- **What I chose against, and why.** A post-`res` fire-and-forget audit queue for everything: it buys decoupling but re-introduces exactly the "unrecorded crash window" this concept exists to close, and for a single-node slice the in-transaction write is one extra statement, not a tax.
+
+### Best-effort recording: the audit must never fail the operation
+
+- **What it is.** `recordAudit` never lets a write error escape: the whole body is `try`, failures become `console.error("Failed to write audit log entry", err)`, and the caller proceeds as if nothing happened (`server/src/services/audit.js:23-49`). It is a policy, not an accident — the comment at the top of the file says so.
+- **Why it is needed.** Auditing is accountability, not a prerequisite to a user signing in or paying. If a malformed metadata blob, a dead DB connection, or a transient constraint error turned a sign-in into a 500 — or worse, rolled back a payment grant because the audit row failed — the audit system would be a *reliability dependency*, which is the exact inversion of what it is for. The operation the user asked for is the operation that matters; auditing rides along.
+- **How I implemented it.** `recordAudit` accepts the already-configured `db` (the plain `prisma` or the transaction client), so callers stay one-liners while a single choke point owns the failure behaviour.
+- **What I chose against, and why.** A synchronous `throw` with the caller responsible for catching (every call site silently becomes a similar try/catch, and one forgotten catch reintroduces the crash); and writing audit rows to a *separate* database with its own failure modes (more moving parts, and the in-transaction property becomes impossible). Best-effort in the same database is the cheapest correct envelope.
+
+### The actor disappeared — the row still lands (the P2003 fallback)
+
+- **What it is.** If a write against `actor_id` trips Prisma's `P2003` foreign-key error — the actor was deleted between the moment the action happened and the moment the row was written — `recordAudit` retries once with `actorId: null` (`server/src/services/audit.js:37-46`), so the fact lands even though its actor no longer exists.
+- **Why it is needed.** A stale session can outlive its user (Part I destroys sessions on reset; nothing stops a cookie from being replayed against a deleted account). Without the fallback, "record this sign-out" would crash into the same FK the schema added to *preserve* history — the very property becomes the failure mode.
+- **How I implemented it.** `ON DELETE SET NULL` handles the deletion case structurally (rows survive); the `P2003` catch handles the *live transaction* case (actor already gone at write time). Both end in the same state: a row that still says *what* happened, attributed to nobody.
+- **What I chose against, and why.** Aborting the record on the FK error (loses the fact, and the FK is *protecting* history — losing history to honour it is paradoxical) and re-deriving "was this really deleted?" by querying `users` first (an extra round-trip for a condition the database already tells us about with its own error code).
+
+### Recording refusal changes nothing about the refusal
+
+- **What it is.** Blocked requests are recorded by middleware that wraps `res.send`, not by route code. The wrapper inspects the status, writes one row if it is `401` or `403`, and forwards the exact same `body` to the original `send`. The response is byte-identical whether or not the row was written (`server/src/middleware/auditAccess.js:10-47`).
+- **Why it is needed.** The moment "did I record the refusal" becomes an if-statement inside a route, a route added later forgets it — and unauthorised access is precisely the event that wants no exceptions. Centralising it in one middleware means every future 401/403 (from any new route, from the session guard, from the notes 403s, from the webhook 401s) is audited with zero per-route effort. And because it runs *ahead of* the routes, it also covers refusals produced by middleware themselves, not just by handlers.
+- **Why the refusal must be unchanged.** The middleware is a *log*, not a *decision*. Replying 403 because the audit failed (or auditing a request that should not have been refused) would let the log change outcomes. Reading the wrapper, the only things it observes are `statusCode` and `body` — it cannot alter either.
+- **What I chose against, and why.** A route-level helper each handler calls on denial (per-route — the whole concept), and an error-handler that recorded thrown errors as refusals (thrown errors are 500s, not authorisation outcomes). And recording the *body*: a refusal response can carry clues an operator shouldn't have to read; metadata is plentiful without it.
+
+### Deciding who the actor is: anonymous 401 vs session-stamped 403
+
+- **What it is.** Every denied request is recorded, but the row says *whose* denial it was: a `401` has `actor_id = null` (the server did not recognise a session) while a `403` carries the session's `userId` (a signed-in account was refused), and a failed sign-in's attempted email is captured in metadata even though the actor is anonymous.
+- **Why it is needed.** "Somebody tried something" is materially weaker evidence than "account X, using its own session, tried to read account Y's note at 12:03". Attribution is the difference between a log and an investigation. The attempted-email capture is the one legitimate case of recording a *failed* identity: identity was precisely what the request asserted, and not capturing it would leave anonymous 401s untraceable.
+- **How I implemented it.** The wrapper reads `req.session?.userId` (`server/src/middleware/auditAccess.js:18`) and the attempted `req.body.email` if present (`:19-24`, trimmed and lower-cased so the log itself does not create case-sensitive duplicates); the sign-up and forgot routes keep recording *only on success* so the log never turns into an existence oracle (Part I, *Account enumeration prevention*).
+- **What I chose against, and why.** Recording the raw failed password or the full body (the email is a tiny, non-secret assertion; anything more turns the audit log into a password honeypot), and inferring trackable identity from the IP alone when no session exists (IPs are shared and NAT'd, and spoofable through a proxy unless `TRUST_PROXY` says otherwise — the log stores the IP as context, not as identity).
+
+### The relationship to the older ledgers
+
+- **What it is.** Three tables together carry this app's history: `payment_events` (Part II — money-bearing, idempotency-keyed, provider-facing), `note_delete_audit` (Part IV — a frozen snapshot of deleted content metadata), and now `audit_log` (this part — every action across every slice, plus refusals).
+- **Why the split.** Each table serves a different contract. `payment_events` must be *exactly-once* (its `event_key` makes a double-delivered webhook harmless) and must prove amounts; `note_delete_audit` must *survive the death of its subject* (the note row is gone, so the ledger snapshots what it was); `audit_log` must be *append-only in spirit, chronologically reviewable, and actor-attributed* — none of which needs money rules or idempotency, which are the other two tables' reasons for existing.
+- **How I implemented it.** The webhook path writes **both** a `payment_events` row (ledger + idempotency) and an `audit_log` row (`billing.js:290/320/368/413/442/496`) — the same fact served to two authorities — while the note delete writes `note_delete_audit` and `audit_log` in one transaction (`notes.js:59-75`). Operators reading the day's story can join `audit_log` for *who did what* and the domain ledger for *what the money did*.
+- **What I chose against, and why.** Collapsing them into one generic events table: the idempotency and money invariants are billing-specific, and a single table that honours them for all rows would force every non-billing event to carry meaningless fields or lose the constraints that make the billing ledger trustworthy. Three tables, each with exactly the invariants its purpose requires.
+
+### Section 6: What Went Wrong
+
+**1. Hand-editing a migration's bookkeeping row left a phantom "applied" entry.**
+- **Symptom.** After writing the `audit_log` migration by hand (the `prisma migrate dev`/shadow-database route was already unusable in this environment — see Part III, Section 6), `prisma migrate deploy` reported the migration applied, but the history carried a **duplicate** bookkeeping row: the migration had been recorded both by the runner and by a stray `INSERT INTO _prisma_migrations` pasted into the migration SQL during an earlier attempt at making it self-registering.
+- **Investigation.** Dumping `_prisma_migrations` showed the same migration **twice** with different ids; a later `migrate deploy` would see "already applied" from one row and try to re-run the other, and the whole bookkeeping table's trust is one bad pairing away from being meaningless.
+- **Cause.** Trying to make migration application deterministic from inside the SQL. Migrations are SQL *against the schema*; recording state in `_prisma_migrations` is the runner's job — never the migration's.
+- **Fix.** Recreated the migration file clean (the `CREATE TABLE`s and indexes only, no `INSERT`, no `resolved` pill), deleted the rogue bookkeeping row, and re-ran `prisma migrate deploy` — "No pending migrations", one bookkeeping row, drift check green. The rule re-learned: migrations describe schema, the runner describes state, and never let one write the other.
+
+**2. The first sign-out audit write crashed on its own foreign key: `P2003` on a deleted actor.**
+- **Symptom.** Exercising sign-out with a signed-in user whose account had just been deleted (a stale session replayed from the harness) threw `PrismaClientKnownRequestError: … foreign key constraint` on the `audit_log` insert — the very constraint added so history survives deletion had turned into a 500.
+- **Investigation.** `actor_id` is `ON DELETE SET NULL`, which protects *already-written* rows when the user is deleted; it does nothing when the actor is deleted **before** the row is written — the insert races the deletion, and the FK correctly refuses to point at nothing.
+- **Cause.** The design had handled "the actor is gone" only as a database property, not as a runtime event; the write code assumed `actor_id` would always resolve.
+- **Fix.** `recordAudit` now catches `err.code === "P2003"` when an `actorId` was supplied and retries once with `actorId: null` (`server/src/services/audit.js:39-46`) — the fact is kept, the attribution is dropped, the operation that reported a sign-out is unaffected, and the retry is deliberately one-shot (no loop over a condition the database already named).
+
+**3. The E2E verification harness erased its own evidence by deleting the actor.**
+- **Symptom.** A smoke run that created a user, exercised a flow, then cleaned up by deleting the user returned users `0` but left **orphaned sessions and refusal rows whose actor was now `NULL`** — the cleanup order deleted the actor before the refusal evidence was collected.
+- **Investigation.** Deleting a user nulls their `audit_log.actor_id` (the FK doing its job) and the `session` table has no FK at all, so both outlived the user with their attribution stripped.
+- **Cause.** A test-harness ordering bug — but one that previews a *production* reality: an operator deleting an account loses the auditable attribution of that account's refusals (row counts survive, "who" does not), which is exactly the trade the `ON DELETE SET NULL` design accepts.
+- **Fix.** The harness now disposes audit/session rows *after* reading the refusal evidence it needs. The design trade itself stands: preserving history means de-attributing the deleted actor; automating that decision in the harness (rather than fighting the FK) is the honest use of the schema.
+
+### Section 7: What This Slice Does Not Handle
+
+- **The log is read-only from the app's perspective, on purpose.** There is no read endpoint and no UI. Auditability lives in the database for operators and investigators (`SELECT`, plus the per-actor/action indexes) as Part IV already decided for `note_delete_audit`; a dashboard would be a separate feature, and one that must not silently degrade into "users can see each other's audit rows".
+- **No retention, archival, or partitioning.** `audit_log` accumulates forever; the consumed/expired bookkeeping tables (email codes, reset tokens) and this log have no purge job. An operator would want partitioning by `created_at` and an archival policy before this table grows real.
+- **No tamper-evidence.** Rows are ordinary rows: anyone with database access can `UPDATE` or `DELETE` them, and nothing (hash chain, WORM store, external sink) detects that. For a demo slice this is acceptable and honest; it is the first thing to retire in a production audit story.
+- **Only 401/403 are refusal events.** Validation `400`s, unknown-path `404`s, and `500`s are not recorded as `auth.unauthorized_access`. A 500 is not an authorisation decision, and the unknown-path 404 surface belongs to Part I's hardening list; an operator wanting full request coverage would log *every* response (morgan already prints them to the dev console) — the audit table records the authorisation decisions only.
+- **Background transitions are not in the log.** The billing reaper's interval/cancel applications and the worker's stale-job recovery don't write `audit_log` rows (there is no browser actor); the reaper already writes its own `payment_events` rows and stale recovery logs to the console. A full picture of "the system changed itself" would add worker-side records.
+- **`req.ip` is only as trustworthy as `TRUST_PROXY`.** With `TRUST_PROXY = 0` (the default, Part I) the recorded IP is the direct peer; behind a reverse proxy without setting `TRUST_PROXY` the row would show the proxy's address. Same caveat Part I's rate limiting carries, same fix (`TRUST_PROXY`, never trusting spoofable `X-Forwarded-For` blindly).
+- **Per-write cost on hot paths.** Every recorded action is one ordinary insert behind the operation; no batching, buffering, or out-of-band queue. Cheap here, but the batching/concurrency judgement call belongs to the moment the write volume gets real.
+
+### Section 8: If I Built This Again
+
+The core decisions hold: best-effort recording that can never break an operation, refusals captured centrally in middleware rather than per-route, `ON DELETE SET NULL` plus the `P2003` anonymous fallback, and the in-transaction audit row on the note-delete path. I would rebuild all of them as they are. What I would do differently:
+
+- **A request-scoped correlation id from day one.** A `crypto.randomUUID()` stamped once per request (an `x-request-id` echoed to the client) and carried into every `audit_log.metadata` blob would let an operator reconstruct a single *forgot-password flow* ("forgot → email sent → link clicked → reset → all sessions killed") across six rows instead of joining on rough timestamps. It also lights up the refusal path: "user U got a 401 at 12:03:01 and again at 12:03:02" becomes one trace.
+- **I would decide the refusal granularity up front.** Whether to log *only* 401/403 (chosen here) or every response is a product decision about what "access" means; arriving at it by noticing the 404 path wasn't audited is how features drift. In a rebuild I would write the "which statuses are events" rule into the middleware's contract before writing the middleware.
+- **The action vocabulary would be versioned in the schema.** `action` is free text today, disciplined only by the `AUDIT_ACTIONS` constant. A rebuild would store a `schema_version` (or a foreign key to an `audit_actions` dictionary) so a renamed action never silently splits an operator's query across two spellings.
+- **The worker would audit itself.** The reaper transitions and stale-job recovery deserve audit rows with the actor marked as the *system* (a reserved account, or `actor_id` `NULL` plus an explicit `actor: "system"` in metadata), because "who changed this" should not have a silent category. The console logs that cover them today are the honest short-term answer, not the finish line.
