@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { recordAudit, AUDIT_ACTIONS } from "./audit.js";
 
 export async function listNotes(db, userId) {
   return db.note.findMany({
@@ -9,7 +10,7 @@ export async function listNotes(db, userId) {
 }
 
 export async function createNote(db, userId, input) {
-  return db.note.create({
+  const note = await db.note.create({
     data: {
       publicId: randomUUID(),
       title: input.title,
@@ -17,6 +18,15 @@ export async function createNote(db, userId, input) {
       userId,
     },
   });
+  await recordAudit(db, {
+    action: AUDIT_ACTIONS.NOTE_CREATE,
+    actorId: userId,
+    targetType: "note",
+    targetId: String(note.id),
+    detail: "Note created.",
+    metadata: { publicId: note.publicId, title: note.title },
+  });
+  return note;
 }
 
 export async function getNote(db, userId, publicId) {
@@ -53,6 +63,14 @@ export async function deleteNote(db, userId, publicId) {
         title: note.title,
         deletedBy: userId,
       },
+    });
+    await recordAudit(tx, {
+      action: AUDIT_ACTIONS.NOTE_DELETE,
+      actorId: userId,
+      targetType: "note",
+      targetId: String(note.id),
+      detail: "Note deleted.",
+      metadata: { publicId: note.publicId, title: note.title },
     });
     await tx.note.delete({ where: { id: note.id } });
     status = 200;

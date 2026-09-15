@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "nodemon --env-file-if-exists=.env src/index.js",
     "db:migrate": "prisma migrate deploy",
     "db:dev": "prisma migrate dev",
     "db:generate": "prisma generate",
@@ -26,6 +27,8 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "morgan": "^1.12.1",
+    "nodemon": "^3.1.14",
     "prisma": "^7.10.0"
   }
 }

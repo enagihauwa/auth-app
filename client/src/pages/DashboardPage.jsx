@@ -46,7 +46,10 @@ export default function DashboardPage() {
               Signed in as <strong>{user?.name}</strong>
             </p>
           </div>
-          <Badge variant="success">Verified</Badge>
+          <div className="flex-row" style={{ gap: "8px" }}>
+            <Badge variant="success">Verified</Badge>
+            {user?.plan === "pro" ? <Badge variant="info">Pro</Badge> : null}
+          </div>
         </header>
 
         <Card>
@@ -84,6 +87,11 @@ export default function DashboardPage() {
         </Card>
 
         <section className="stat-grid">
+          <Stat
+            label="Plan"
+            value={user?.plan === "pro" ? "Pro" : "Free"}
+            caption={user?.plan === "pro" ? "Pro subscription active" : "Upgrade to Pro"}
+          />
           <Stat label="Member since" value={memberDate} caption="Account created" />
           <Stat label="Session status" value="Active" caption="Session cookie valid for 7 days" />
           <Stat label="Verification" value="100%" caption="Email confirmed" />
@@ -98,6 +106,14 @@ export default function DashboardPage() {
             <div className="stack--sm">
               <p className="type-label-large">Email</p>
               <p className="type-body-medium">{user?.email}</p>
+            </div>
+            <div className="stack--sm">
+              <p className="type-label-large">Plan</p>
+              {user?.plan === "pro" ? (
+                <StatusIndicator tone="success">Pro</StatusIndicator>
+              ) : (
+                <p className="type-body-medium">Free</p>
+              )}
             </div>
             <div className="stack--sm">
               <p className="type-label-large">Status</p>

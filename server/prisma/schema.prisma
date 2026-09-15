@@ -26,6 +26,7 @@ model User {
   processingJobs    ProcessingJob[]
   notes             Note[]
   noteDeleteAudits  NoteDeleteAudit[]
+  auditLogs         AuditLog[]
 
   @@map("users")
 }
@@ -78,6 +79,22 @@ model Subscription {
 
   @@unique([userId], map: "subscriptions_user_id_unique")
   @@map("subscriptions")
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  detail     String?  @db.Text
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([actorId, createdAt], map: "audit_log_actor_created_idx")
+  @@index([action, createdAt], map: "audit_log_action_created_idx")
+  @@map("audit_log")
 }
 
 model CheckoutSession {

@@ -1,4 +1,5 @@
 import express from "express";
+import morgan from "morgan";
 import session from "express-session";
 import pgSession from "connect-pg-simple";
 import pg from "pg";
@@ -11,9 +12,12 @@ import billingRouter from "./routes/billing.js";
 import mockProviderRouter from "./routes/mockProvider.js";
 import { genericLimiter } from "./rateLimit.js";
 import { startReaper } from "./services/reaper.js";
+import { auditUnauthorizedAccess } from "./middleware/auditAccess.js";
 
 const app = express();
 
+app.use(morgan(isProduction ? "combined" : "dev"));
+app.use(auditUnauthorizedAccess());
 app.use(
   express.json({
     // Capture the exact request body so webhook signatures can be verified

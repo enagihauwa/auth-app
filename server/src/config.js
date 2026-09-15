@@ -1,3 +1,22 @@
+import { fileURLToPath } from "node:url";
+
+// Load environment before any config is read. This mirrors prisma.config.ts so the
+// app is immune to how it was launched: `npm run dev`, `node src/index.js`, or a
+// bare `node` from any directory all get the same `.env`. Existing process
+// environment is never overwritten (loadEnvFile is a no-op for keys already set),
+// so the list runs most-specific first: server/src/.env, then server/.env, then
+// the repository root .env that `.env.example` documents. The root file was
+// previously never read at all, which silently reduced every key it is the only
+// home for -- SMTP_*, SESSION_SECRET, APP_URL, the rate-limit knobs -- to the
+// fallback defaults below.
+for (const candidate of ["./.env", "../.env", "../../.env"]) {
+  try {
+    process.loadEnvFile(fileURLToPath(new URL(candidate, import.meta.url)));
+  } catch {
+    // File is optional (e.g. production env fully provided by the host).
+  }
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -26,8 +45,10 @@ export const config = {
     host: process.env.SMTP_HOST ?? "127.0.0.1",
     port: Number(process.env.SMTP_PORT ?? 1025),
     secure: process.env.SMTP_SECURE === "true",
-    user: process.env.SMTP_USER ?? undefined,
-    pass: process.env.SMTP_PASS ?? undefined,
+    // `||`, not `??`: .env.example ships SMTP_USER/SMTP_PASS present but empty for
+    // local Mailpit, and an empty string must mean "no auth", not "auth as ''".
+    user: process.env.SMTP_USER || undefined,
+    pass: process.env.SMTP_PASS || undefined,
     from: process.env.MAIL_FROM ?? "Auth App <auth@localhost>",
   },
   timings: {

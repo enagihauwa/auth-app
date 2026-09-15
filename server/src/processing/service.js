@@ -7,6 +7,7 @@ import {
   ProviderNotConfiguredError,
   ProviderTimeoutError,
   ProviderCallError,
+  ProviderTruncatedError,
 } from "./provider.js";
 
 // The defined retry and the defined graceful failure:
@@ -71,6 +72,9 @@ function readableError(err) {
   if (err instanceof ProviderTimeoutError) {
     return err.message;
   }
+  if (err instanceof ProviderTruncatedError) {
+    return err.message;
+  }
   if (err instanceof ProviderCallError) {
     return err.message;
   }
@@ -118,7 +122,12 @@ export async function runProcessingJob({ jobId, provider = defaultGenerateStruct
       result = parsed.data;
       break;
     } catch (err) {
-      if (err instanceof ValidationFailureError) {
+      if (err instanceof ProviderTruncatedError) {
+        // Deterministic: the same prompt under the same budget truncates again.
+        // Fail now with the actionable message instead of burning every attempt.
+        error = err;
+        break;
+      } else if (err instanceof ValidationFailureError) {
         error = err;
         if (attempt < maxAttempts) {
           feedback = validationFeedback(err);

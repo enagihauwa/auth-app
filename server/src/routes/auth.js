@@ -4,6 +4,7 @@ import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { sha256Hex, createVerificationCode, createResetToken } from "../services/tokens.js";
 import { sendEmail, verificationEmail, resetEmail } from "../mailer.js";
+import { recordAudit, AUDIT_ACTIONS } from "../services/audit.js";
 import {
   signupSchema,
   signinSchema,
@@ -89,6 +90,15 @@ router.post(
           .json({ error: "Account created but we could not send the email. Resend the code." });
       }
 
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.SIGNUP,
+        actorId: userId,
+        targetType: "user",
+        targetId: userId,
+        detail: "New account registered.",
+        metadata: { email: normalizedEmail },
+      });
+
       return res.status(201).json({
         message: "Account created. Check your email for a verification code.",
         email: normalizedEmail,
@@ -138,6 +148,15 @@ router.post(
           data: { emailVerifiedAt: new Date(), updatedAt: new Date() },
         }),
       ]);
+
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.VERIFY_EMAIL,
+        actorId: user.id,
+        targetType: "user",
+        targetId: user.id,
+        detail: "Email address verified.",
+        metadata: { email: user.email, codeId: codeRow.id },
+      });
 
       req.session.userId = user.id;
       await persistSession(req, res);
@@ -223,6 +242,14 @@ router.post(
 
       req.session.userId = user.id;
       await persistSession(req, res);
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.SIGNIN,
+        actorId: user.id,
+        targetType: "user",
+        targetId: user.id,
+        detail: "Signed in.",
+        metadata: { email: user.email },
+      });
       return res.json({ message: "Signed in." });
     } catch (err) {
       next(err);
@@ -243,19 +270,36 @@ router.post(
         select: { id: true, email: true },
       });
 
-      if (user) {
-        const token = await createResetToken(user.id, {
-          ttlMs: config.timings.resetTokenTtlMs,
-        });
-        const resetUrl = `${config.appUrl}/reset?token=${token}`;
-        await sendEmail({
-          to: user.email,
-          ...resetEmail(user.email, resetUrl, config.timings.resetTokenTtlMs / 60000),
+      // Deliberately tells the caller when the address is unknown, instead of the
+      // neutral "if that email has an account" reply used elsewhere. This trades
+      // away account-enumeration protection -- anyone can probe which addresses
+      // are registered -- in exchange for a reset form that explains itself when
+      // nothing arrives. `forgotLimiter` is what keeps bulk probing expensive.
+      if (!user) {
+        return res.status(404).json({
+          error: "No account found with that email. Check the address, or sign up first.",
         });
       }
 
+      const token = await createResetToken(user.id, {
+        ttlMs: config.timings.resetTokenTtlMs,
+      });
+      const resetUrl = `${config.appUrl}/reset?token=${token}`;
+      await sendEmail({
+        to: user.email,
+        ...resetEmail(user.email, resetUrl, config.timings.resetTokenTtlMs / 60000),
+      });
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.FORGOT_PASSWORD,
+        actorId: user.id,
+        targetType: "user",
+        targetId: user.id,
+        detail: "Password reset link requested.",
+        metadata: { email: user.email },
+      });
+
       return res.json({
-        message: "If that email has an account, a reset link is on its way.",
+        message: "A reset link is on its way to your inbox.",
       });
     } catch (err) {
       next(err);
@@ -296,6 +340,15 @@ router.post(
         await tx.$executeRaw`DELETE FROM "session" WHERE sess->>'userId' = ${tokenRow.userId}`;
       });
 
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.RESET_PASSWORD,
+        actorId: tokenRow.userId,
+        targetType: "user",
+        targetId: tokenRow.userId,
+        detail: "Password reset via token.",
+        metadata: { tokenId: tokenRow.id },
+      });
+
       return res.json({ message: "Password reset. Sign in with your new password." });
     } catch (err) {
       next(err);
@@ -304,6 +357,7 @@ router.post(
 );
 
 router.post("/signout", (req, res) => {
+  const userId = req.session?.userId;
   if (req.session) {
     req.session.destroy((err) => {
       if (err) {
@@ -311,6 +365,15 @@ router.post("/signout", (req, res) => {
         return res.status(500).json({ error: "Could not sign out." });
       }
       res.clearCookie("sid");
+      if (userId) {
+        void recordAudit(prisma, {
+          action: AUDIT_ACTIONS.SIGNOUT,
+          actorId: userId,
+          targetType: "user",
+          targetId: userId,
+          detail: "Signed out.",
+        });
+      }
       return res.json({ message: "Signed out." });
     });
   } else {

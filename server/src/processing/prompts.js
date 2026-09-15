@@ -29,6 +29,7 @@ export const ROLES = {
       temperature: 0,
       topP: 1,
       maxOutputTokens: 2048,
+      thinkingLevel: "MINIMAL",
     },
     paramJustification: {
       temperature:
@@ -37,6 +38,10 @@ export const ROLES = {
         "topP=1 disables nucleus sampling entirely so temperature (already 0) is the only sampling influence.",
       maxOutputTokens:
         "2048 comfortably holds a long line-itemised receipt while capping output cost per run.",
+      thinkingLevel:
+        "Reasoning tokens are billed against maxOutputTokens on this model, so an unbounded " +
+        "thinking budget starves the JSON and truncates it mid-token. Transcribing printed " +
+        "figures needs no deliberation, so MINIMAL leaves the whole budget for output.",
     },
     schema: {
       zod: expenseSummarySchema,
@@ -61,6 +66,7 @@ export const ROLES = {
       temperature: 0.4,
       topP: 0.95,
       maxOutputTokens: 1024,
+      thinkingLevel: "MINIMAL",
     },
     paramJustification: {
       temperature:
@@ -69,6 +75,10 @@ export const ROLES = {
         "0.95 keeps nucleus sampling at its documented default so temperature alone is the tuned creative knob.",
       maxOutputTokens:
         "1024 caps the memo and bullet points while ample margin over the typical ~200-token output, bounding cost.",
+      thinkingLevel:
+        "Measured: with thinking unbounded this role spent 980 of its 1024 tokens reasoning and " +
+        "emitted 29 tokens of JSON, failing every attempt on truncation. The memo restates JSON " +
+        "it has already been handed, so MINIMAL costs nothing in quality and fixes the failure.",
     },
     schema: {
       zod: editResultSchema,

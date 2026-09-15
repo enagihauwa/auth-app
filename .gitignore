@@ -17,6 +17,9 @@ server/src/storage/files/
 # Local-only tooling
 tools/
 
+# Access-control audit notes (contains real test-run credentials/UUIDs)
+server/curl_audit_commands.md
+
 # Headless Chrome profiles created by the evidence screenshot scripts
 .chrome-shot-profile*/
 
