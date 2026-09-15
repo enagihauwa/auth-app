@@ -566,6 +566,35 @@
   max-width: 26rem;
 }
 
+/* --- Notes --- */
+
+.notes-shell {
+  width: 100%;
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 40px 20px 64px;
+  display: grid;
+  gap: 20px;
+}
+
+.note-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.note-public-link {
+  font-family: var(--typography-number-fontfamily);
+  font-size: var(--typography-label-medium-fontsize);
+  color: var(--colour-roles-primary);
+  padding: var(--spacing-collection-extra-small-spacing)
+    var(--spacing-collection-small-spacing);
+  border: 1px solid var(--colour-roles-outline-variant);
+  border-radius: 8px;
+  background: var(--colour-roles-surface-container-lowest);
+  display: inline-block;
+  overflow-wrap: anywhere;
+}
+
 /* --- Stat --- */
 
 .ui-stat {

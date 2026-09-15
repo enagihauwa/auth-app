@@ -10,6 +10,9 @@ import DashboardPage from "./pages/DashboardPage.jsx";
 import UploadPage from "./pages/UploadPage.jsx";
 import JobViewPage from "./pages/JobViewPage.jsx";
 import DesignSystemPage from "./pages/DesignSystemPage.jsx";
+import NotesPage from "./pages/NotesPage.jsx";
+import NoteCreatePage from "./pages/NoteCreatePage.jsx";
+import NoteDetailPage from "./pages/NoteDetailPage.jsx";
 import PlansPage from "./pages/PlansPage.jsx";
 import ReturnPage from "./pages/ReturnPage.jsx";
 import BillingPage from "./pages/BillingPage.jsx";
@@ -144,6 +147,36 @@ export default function App() {
             <ErrorBoundary>
               <ProtectedRoute>
                 <BillingPage />
+              </ProtectedRoute>
+            </ErrorBoundary>
+          }
+        />
+        <Route
+          path="/notes"
+          element={
+            <ErrorBoundary>
+              <ProtectedRoute>
+                <NotesPage />
+              </ProtectedRoute>
+            </ErrorBoundary>
+          }
+        />
+        <Route
+          path="/notes/new"
+          element={
+            <ErrorBoundary>
+              <ProtectedRoute>
+                <NoteCreatePage />
+              </ProtectedRoute>
+            </ErrorBoundary>
+          }
+        />
+        <Route
+          path="/notes/:publicId"
+          element={
+            <ErrorBoundary>
+              <ProtectedRoute>
+                <NoteDetailPage />
               </ProtectedRoute>
             </ErrorBoundary>
           }

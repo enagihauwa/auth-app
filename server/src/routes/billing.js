@@ -12,6 +12,7 @@ import {
   logPaymentEvent,
   currentSubscriptionForUser,
 } from "../services/billing.js";
+import { recordAudit, AUDIT_ACTIONS } from "../services/audit.js";
 import { checkoutUrl, verifyWebhookSignature } from "../billing/provider.js";
 
 const router = Router();
@@ -104,6 +105,15 @@ router.post("/api/billing/checkout", requireUser, checkoutLimiter, validateBody(
     eventKey: `checkout:${reference}`,
   });
 
+  await recordAudit(prisma, {
+    action: AUDIT_ACTIONS.CHECKOUT_INITIATED,
+    actorId: userId,
+    targetType: "checkout_session",
+    targetId: reference,
+    detail: "Checkout session opened.",
+    metadata: { plan: "pro", interval, amountMinor, currency: config.pricing.currency },
+  });
+
   return res.json({ url: checkoutUrl(reference), reference, existing: false, amountMinor });
 });
 
@@ -176,6 +186,15 @@ router.post("/api/billing/downgrade", requireUser, async (req, res) => {
     },
   });
 
+  await recordAudit(prisma, {
+    action: AUDIT_ACTIONS.DOWNGRADE_SCHEDULED,
+    actorId: userId,
+    targetType: "subscription",
+    targetId: String(sub.id),
+    detail: "Downgrade to monthly scheduled for the next period.",
+    metadata: { from: sub.interval, to: "month", appliedAt: updated.periodEnd },
+  });
+
   return res.json({ subscription: serializeSubscription(updated) });
 });
 
@@ -216,6 +235,15 @@ router.post("/api/billing/cancel", requireUser, validateBody(cancelSchema), asyn
       accessUntil: updated.periodEnd,
       reason,
     },
+  });
+
+  await recordAudit(prisma, {
+    action: AUDIT_ACTIONS.CANCELLATION_SCHEDULED,
+    actorId: userId,
+    targetType: "subscription",
+    targetId: String(sub.id),
+    detail: "Subscription cancellation scheduled at the end of the period.",
+    metadata: { accessUntil: updated.periodEnd, reason },
   });
 
   return res.json({ subscription: serializeSubscription(updated) });
@@ -259,6 +287,14 @@ router.post(
           originalEventId: existing.id.toString(),
         },
       });
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.PAYMENT_DUPLICATE_IGNORED,
+        actorId: existing.userId,
+        targetType: "checkout_session",
+        targetId: reference,
+        detail: "Duplicate provider webhook ignored.",
+        metadata: { eventId, originalPaymentEventId: existing.id.toString() },
+      });
       return res.json({ ok: true, duplicate: true });
     }
 
@@ -280,6 +316,14 @@ router.post(
           eventType: "duplicate_webhook_ignored",
           amountMinor: session.amountMinor,
           data: { reason: "checkout already completed" },
+        });
+        await recordAudit(prisma, {
+          action: AUDIT_ACTIONS.PAYMENT_DUPLICATE_IGNORED,
+          actorId: userId,
+          targetType: "checkout_session",
+          targetId: reference,
+          detail: "Webhook for an already-completed checkout ignored.",
+          metadata: { eventId, reason: "checkout already completed" },
         });
         return res.json({ ok: true, duplicate: true });
       }
@@ -321,6 +365,14 @@ router.post(
         data: { rawPayload: payload },
         eventKey,
       });
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.PAYMENT_FAILED,
+        actorId: userId,
+        targetType: "checkout_session",
+        targetId: reference,
+        detail: "Provider reported a failed payment.",
+        metadata: { eventId, amountMinor: session.amountMinor, currency: session.currency },
+      });
       return res.json({ ok: true });
     }
 
@@ -358,6 +410,20 @@ async function fulfilPayment({ userId, session }) {
       },
     });
 
+    await recordAudit(prisma, {
+      action: AUDIT_ACTIONS.SUBSCRIPTION_UPGRADE_SCHEDULED,
+      actorId: userId,
+      targetType: "subscription",
+      targetId: String(sub.id),
+      detail: "Yearly upgrade scheduled for the next period.",
+      metadata: {
+        reference: session.reference,
+        from: "month",
+        to: "year",
+        appliedAt: sub.periodEnd,
+      },
+    });
+
     await logPaymentEvent({
       userId,
       subscriptionId: sub.id,
@@ -371,6 +437,15 @@ async function fulfilPayment({ userId, session }) {
         scheduled: true,
         startsAt: sub.periodEnd,
       },
+    });
+
+    await recordAudit(prisma, {
+      action: AUDIT_ACTIONS.SUBSCRIPTION_FULFILLED,
+      actorId: userId,
+      targetType: "subscription",
+      targetId: String(sub.id),
+      detail: "Subscription fulfilled (scheduled upgrade).",
+      metadata: { reference: session.reference, plan: "pro", interval: "year", scheduled: true },
     });
 
     await prisma.user.update({ where: { id: userId }, data: { plan: "pro", updatedAt: now } });
@@ -416,6 +491,21 @@ async function fulfilPayment({ userId, session }) {
     eventType: "subscription_fulfilled",
     amountMinor: session.amountMinor,
     data: { plan: "pro", interval: session.interval, periodStart, periodEnd, upgrade: false },
+  });
+
+  await recordAudit(prisma, {
+    action: AUDIT_ACTIONS.SUBSCRIPTION_FULFILLED,
+    actorId: userId,
+    targetType: "subscription",
+    targetId: String(subRow.id),
+    detail: "Subscription fulfilled.",
+    metadata: {
+      reference: session.reference,
+      plan: "pro",
+      interval: session.interval,
+      periodStart,
+      periodEnd,
+    },
   });
 }
 

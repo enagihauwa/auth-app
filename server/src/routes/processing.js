@@ -11,6 +11,7 @@ import {
 } from "../rateLimit.js";
 import { newStorageKey, put } from "../processing/storage.js";
 import { enqueue } from "../processing/worker.js";
+import { recordAudit, AUDIT_ACTIONS } from "../services/audit.js";
 
 const router = Router();
 
@@ -126,6 +127,14 @@ router.post("/upload", requireUser, processingUploadLimiter, (req, res) => {
       }
 
       enqueue(job.id);
+      await recordAudit(prisma, {
+        action: AUDIT_ACTIONS.JOB_CREATED,
+        actorId: req.session.userId,
+        targetType: "processing_job",
+        targetId: String(job.id),
+        detail: "Upload job created.",
+        metadata: { kind: "EXTRACT", files: files.map((f) => ({ name: f.originalname, sizeBytes: f.size })) },
+      });
       return res.status(201).json({ job: { id: job.id, status: "PENDING" } });
     } catch (innerErr) {
       console.error("POST /api/processing/upload failed", innerErr);
@@ -182,6 +191,14 @@ router.post(
       select: { id: true },
     });
     enqueue(job.id);
+    await recordAudit(prisma, {
+      action: AUDIT_ACTIONS.JOB_FOLLOW_UP,
+      actorId: req.session.userId,
+      targetType: "processing_job",
+      targetId: String(job.id),
+      detail: "Follow-up job created.",
+      metadata: { parentId: parent.id, action: req.body.action },
+    });
     res.status(201).json({ job: { id: job.id, status: "PENDING" } });
   }
 );
@@ -203,6 +220,14 @@ router.post("/jobs/:id/retry", requireUser, processingRetryLimiter, async (req, 
     select: { id: true },
   });
   enqueue(updated.id);
+  await recordAudit(prisma, {
+    action: AUDIT_ACTIONS.JOB_RETRIED,
+    actorId: req.session.userId,
+    targetType: "processing_job",
+    targetId: String(updated.id),
+    detail: "Failed job requeued for another attempt.",
+    metadata: {},
+  });
   res.json({ job: { id: updated.id, status: "PENDING" } });
 });
 

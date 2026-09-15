@@ -30,6 +30,23 @@ export class ProviderCallError extends Error {
   }
 }
 
+// Deliberately NOT a subclass of ProviderCallError: the service retries those, and
+// running out of output budget is deterministic. Retrying spends the same tokens to
+// fail the same way, which is what turned a one-line config problem into three
+// identical failed attempts.
+export class ProviderTruncatedError extends Error {
+  constructor(role, { maxOutputTokens, thoughtsTokens, outputTokens }) {
+    super(
+      `The model ran out of output budget before finishing its JSON (${role}). ` +
+        `It spent ${thoughtsTokens} token(s) thinking and ${outputTokens} on the answer, ` +
+        `against a ${maxOutputTokens}-token cap. Lower the role's thinkingLevel or raise ` +
+        `maxOutputTokens in processing/prompts.js.`
+    );
+    this.name = "ProviderTruncatedError";
+    this.role = role;
+  }
+}
+
 let client = null;
 let configurationChecked = false;
 
@@ -66,6 +83,8 @@ export async function generateStructured({
   const timer = setTimeout(() => controller.abort(), config.processing.modelTimeoutMs);
 
   let text;
+  let finishReason;
+  let usage = {};
   try {
     const response = await api.models.generateContent({
       model: config.processing.modelId,
@@ -81,9 +100,17 @@ export async function generateStructured({
         maxOutputTokens: roleDef.params.maxOutputTokens,
         responseMimeType: "application/json",
         responseSchema: roleDef.schema.json,
+        // Gemini 3 charges reasoning tokens to maxOutputTokens and rejects the
+        // older `thinkingBudget` knob outright (400 INVALID_ARGUMENT), so the
+        // level is the only supported way to stop thinking from eating the answer.
+        ...(roleDef.params.thinkingLevel
+          ? { thinkingConfig: { thinkingLevel: roleDef.params.thinkingLevel } }
+          : {}),
       },
     });
     text = response?.text;
+    finishReason = response?.candidates?.[0]?.finishReason;
+    usage = response?.usageMetadata ?? {};
   } catch (err) {
     if (err?.name === "AbortError" || /abort|timeout/i.test(err?.message ?? "")) {
       throw new ProviderTimeoutError(role);
@@ -94,8 +121,20 @@ export async function generateStructured({
     clearTimeout(timer);
   }
 
+  // Check this before parsing: a budget overrun produces a fragment that is also
+  // invalid JSON, and reporting it as a parse failure hides the actual cause.
+  if (finishReason === "MAX_TOKENS") {
+    throw new ProviderTruncatedError(role, {
+      maxOutputTokens: roleDef.params.maxOutputTokens,
+      thoughtsTokens: usage.thoughtsTokenCount ?? 0,
+      outputTokens: usage.candidatesTokenCount ?? 0,
+    });
+  }
+
   if (typeof text !== "string" || text.trim() === "") {
-    throw new ProviderCallError(`The model returned an empty response (${role}).`);
+    throw new ProviderCallError(
+      `The model returned an empty response (${role}, finishReason=${finishReason ?? "unknown"}).`
+    );
   }
 
   try {
@@ -105,9 +144,13 @@ export async function generateStructured({
       .replace(/^```(?:json)?\s*\r?\n?/i, "")
       .replace(/\r?\n?```\s*$/, "");
     return JSON.parse(normalized);
-  } catch {
+  } catch (err) {
+    // Carry the evidence. Without the snippet and finishReason this failure is
+    // indistinguishable from a dozen others and cannot be diagnosed from logs.
     throw new ProviderCallError(
-      `The model returned something that is not valid JSON (${role}).`,
+      `The model returned something that is not valid JSON (${role}, ` +
+        `finishReason=${finishReason ?? "unknown"}, ${text.length} chars). ` +
+        `${err.message}. Response began: ${JSON.stringify(text.slice(0, 200))}`
     );
   }
 }

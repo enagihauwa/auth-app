@@ -46,7 +46,10 @@ export default function DashboardPage() {
               Signed in as <strong>{user?.name}</strong>
             </p>
           </div>
-          <Badge variant="success">Verified</Badge>
+          <div className="flex-row" style={{ gap: "8px" }}>
+            <Badge variant="success">Verified</Badge>
+            {user?.plan === "pro" ? <Badge variant="info">Pro</Badge> : null}
+          </div>
         </header>
 
         <Card>
@@ -66,7 +69,29 @@ export default function DashboardPage() {
           </div>
         </Card>
 
+        <Card>
+          <div className="ui-card__body" style={{ display: "grid", gap: "20px" }}>
+            <div className="stack--sm">
+              <h2 className="type-title-medium">Private notes</h2>
+              <p className="muted">
+                Your own notes space. Every record is scoped to your account, each write is
+                validated, and deleting one leaves an audit trail behind.
+              </p>
+            </div>
+            <div>
+              <Button type="button" variant="secondary" onClick={() => navigate("/notes")}>
+                Open notes
+              </Button>
+            </div>
+          </div>
+        </Card>
+
         <section className="stat-grid">
+          <Stat
+            label="Plan"
+            value={user?.plan === "pro" ? "Pro" : "Free"}
+            caption={user?.plan === "pro" ? "Pro subscription active" : "Upgrade to Pro"}
+          />
           <Stat label="Member since" value={memberDate} caption="Account created" />
           <Stat label="Session status" value="Active" caption="Session cookie valid for 7 days" />
           <Stat label="Verification" value="100%" caption="Email confirmed" />
@@ -81,6 +106,14 @@ export default function DashboardPage() {
             <div className="stack--sm">
               <p className="type-label-large">Email</p>
               <p className="type-body-medium">{user?.email}</p>
+            </div>
+            <div className="stack--sm">
+              <p className="type-label-large">Plan</p>
+              {user?.plan === "pro" ? (
+                <StatusIndicator tone="success">Pro</StatusIndicator>
+              ) : (
+                <p className="type-body-medium">Free</p>
+              )}
             </div>
             <div className="stack--sm">
               <p className="type-label-large">Status</p>

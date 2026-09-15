@@ -1,4 +1,5 @@
 import express from "express";
+import morgan from "morgan";
 import session from "express-session";
 import pgSession from "connect-pg-simple";
 import pg from "pg";
@@ -6,13 +7,17 @@ import { prisma } from "./db.js";
 import { config, isProduction } from "./config.js";
 import authRouter from "./routes/auth.js";
 import processingRouter from "./routes/processing.js";
+import notesRouter from "./routes/notes.js";
 import billingRouter from "./routes/billing.js";
 import mockProviderRouter from "./routes/mockProvider.js";
 import { genericLimiter } from "./rateLimit.js";
 import { startReaper } from "./services/reaper.js";
+import { auditUnauthorizedAccess } from "./middleware/auditAccess.js";
 
 const app = express();
 
+app.use(morgan(isProduction ? "combined" : "dev"));
+app.use(auditUnauthorizedAccess());
 app.use(
   express.json({
     // Capture the exact request body so webhook signatures can be verified
@@ -59,6 +64,7 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/auth", authRouter);
 app.use("/api/processing", processingRouter);
+app.use("/api/notes", notesRouter);
 app.use(billingRouter);
 app.use("/pay", mockProviderRouter);
 

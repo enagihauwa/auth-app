@@ -10,15 +10,17 @@
     "db:dev": "npm --prefix server run db:dev",
     "db:generate": "npm --prefix server run db:generate",
     "db:studio": "npm --prefix server run db:studio",
-    "dev": "concurrently -k -n mail,api,client -c blue,green,magenta \"npm run dev:mail\" \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "node --env-file-if-exists=.env --watch server/src/index.js",
+    "dev": "concurrently -n mail,api,client -c blue,green,magenta \"npm run dev:mail\" \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "nodemon --cwd server --env-file-if-exists=.env src/index.js",
     "dev:client": "npm --prefix client run dev",
-    "dev:mail": "tools\\mailpit\\mailpit.exe"
+    "dev:mail": "node scripts/dev-mail.mjs"
   },
   "dependencies": {
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "concurrently": "^10.0.5"
+    "concurrently": "^10.0.5",
+    "morgan": "^1.12.1",
+    "nodemon": "^3.1.14"
   }
 }
